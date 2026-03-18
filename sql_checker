@@ -1,0 +1,738 @@
+#!/usr/bin/perl
+
+use Env;
+use strict;
+use Data::Dumper;
+use Getopt::Long;
+use Term::ANSIColor;
+
+
+
+#############################################################################################################################
+#	How to run					sql_checker.pl -f <filename> -o <output_file> -e <error_file> [-h]	
+#
+#	Description					The program do multiple checks between the SQl code present in PCO code
+#							and the actual Sql file.	
+#
+#	
+#								variables
+#	$file_content							the contents of file passed as input
+#	$data_division_chunk						the part of cobol file where variables are declared
+#	$sql_code							sql code block found in the input file [iterating elements of sql_code_list]
+#	$where_part							the "whrere" of sql block
+#	$cobol_sql_query_var_flow					Flow of variables in where clause to match with flow in sql file.
+#	$sql_filename							the sql filename called in sql query
+#	$sql_sql_query_var_flow						Flow of variables in key part in sql file.
+#
+#								arrays and hash
+#	@cobol_variables						All the variables in cobol file
+#	@sql_code_list							List of all sql block in input file 
+#	@variables_in_where						list of all variables present in where clause
+#	@variables_flow							list of all variables present in where clause without their opposite value.
+#	@sql_variables							List of all variables declared in sql file.
+#
+#								sub routines
+#	match_the_two
+#	It takes two variables and one array as arguments the variables are which has to be compared for datatype and length.
+#
+#############################################################################################################################
+
+
+my $file;
+my $help;
+my $irno;
+my $output_file;
+my $error_file;
+
+GetOptions(
+	'f=s' => \$file,
+	'h'   => \$help,
+        'o'   => \$output_file,
+        'e'   => \$error_file
+
+) or die "Error in command line arguments\n";
+
+# Display help message if -h is provided
+if ($help) {
+    print "Usage: $0 -f <filename> -o <output_file> -e <error_file> [-h]\n";
+    exit;
+}
+
+# Check if -f is provided
+unless (defined $file) {
+    die "Usage: $0 -f <filename> [-h]\n";
+}
+
+if(!-e $file || !-r $file){
+        print "$file not exists or readable\n";
+        exit;
+}
+
+if(defined $output_file){
+    if(!-e $output_file || !-r $output_file){
+        print "$output_file not exists or readable\n";
+        exit;
+    }
+}
+else{
+    $output_file=`pwd`;
+    $output_file=~ s/^\s+|\s+$//g;
+    $output_file.="/sql_checker_Output.txt";
+
+}
+
+if(defined $error_file){
+    if(!-e $error_file || !-r $error_file){
+        print "$error_file not exists or readable\n";
+        exit;
+    }
+}
+else{
+    $error_file=`pwd`;
+    $error_file=~ s/^\s+|\s+$//g;
+    $error_file.="/sql_checker_Error.txt";
+
+}
+
+
+#reading the input file in a variable
+open(my $fd,'<',"/fns/d0/r/src/LIBRYMIS/DBFILTBL") or die "Can't open file $!";
+my $DBFILTBL_file_content = do { local $/; <$fd> };
+close $fd;
+
+
+open(my $dn, '<', "/home/fnsonld7/bilal/perl/cobol_sql_match/day_night_tables.txt") or die "Can't open file $!";
+chomp(my @day_night_tables = <$dn>);
+close $dn;
+
+
+
+open(ER ,'>',$error_file) or "could not open '$error_file' $!";
+open(OP ,'>',$output_file) or "could not open '$output_file' $!";
+
+
+#reading the input file in a variable
+open(my $fs,'<',$file) or die "Can't open file $!";
+my $file_content = do { local $/; <$fs> };
+close $fs;
+
+$file_content=~s/^\w{6}\*.*//gm;
+$file_content=~s/^\w{6}//gm;
+#print "\n$file_content\n";
+
+#This section gets the variable part in COBOL\PCO file and 
+#extract the variables and store them in a array @cobol_variables.
+#
+my ($data_division_chunk)=$file_content=~m/DATA DIVISION(.*?)PROCEDURE DIVISION/s;
+my @cobol_variables;
+foreach my $line (split(/\n/, $file_content)){
+   if ($line =~m/\s+PIC\s+/i && $line!~m/^\*/) {
+        if($line=~ m/\d{2}\s+(.*?)\s+PIC\s*(.*?)(?:VALUE|\.|\s)/gm){
+        my $var_details=$1;
+        my $var=$2;
+	my($length,$datatype);
+        if ( $var eq "X" || $var eq "9" || $var eq "S9")
+                {
+                $length=1;
+                $datatype=$var;
+                #print "$var -- Length : $length -- Datatype : $datatype\n";
+                }
+        elsif( $var=~m/^X+$/ || $var=~m/^9+$/)
+                {
+                $length=length($var);
+                $datatype=substr($var,1,1);
+                #print "$var -- Length : $length -- Datatype : $datatype\n";
+                }
+        elsif($var =~m/\(/)
+                {
+                ($length)=$var=~m/\((.*?)\)/;
+                ($datatype)=$var=~m/^(.*?)\(/;
+                #print "$var -- Length : $length -- Datatype : $datatype\n";
+                }
+        push @cobol_variables , "$var_details -1> $datatype -2> $length";
+
+                }
+        }
+
+
+
+
+}
+#print Dumper \@cobol_variables;
+
+
+#This section first gets all the sql blocks in COBOL\PCO file
+#and then we loop on them to process them one by one
+#
+my (@sql_code_list) = $file_content =~m/EXEC\s*SQL\s*(.*?)\s*END-EXEC/sg;
+
+for my $sql_code (@sql_code_list){
+        #used eval so that code should not gets stuck if there is a regex issue 
+        eval{
+
+	my (@nested_sql_check)=$sql_code =~m/(SELECT)/gs;
+	my $nested_size = @nested_sql_check;
+	
+	next if ($sql_code!~m/FROM/);
+	#next if ($sql_code!~m/WHERE/);
+	next if ($sql_code=~m/^\s*PREPARE/);
+
+
+        #This part gets all the varibles if a cursor is decalred in the sql block
+        #and creates a variable cursor_variables_flow which contains the flow or 
+        #sequence of the variable 
+	my @cursor_variables;
+	my($cursor)=$sql_code=~m/DECLARE\s*(.*?)\s*CURSOR/s;
+	if (defined $cursor){
+		my($cursor_variables_chunk)=$file_content=~m/FETCH\s*$cursor\s*INTO\s*(.*?)\s*END-EXEC/s;
+		
+		if ($cursor_variables_chunk =~m/,/){
+			my @temp_cursor_arr =split(/,/,$cursor_variables_chunk );
+			push @cursor_variables ,@temp_cursor_arr;
+		}
+		else{
+			push @cursor_variables,$cursor_variables_chunk;
+			
+		}
+
+
+	}
+        @cursor_variables = map { $_=~ s/^\s+|\s+$//g; $_ } @cursor_variables;
+        @cursor_variables = map { $_=~ s/^\s*://g; $_ } @cursor_variables;
+	my $cursor_variables_flow=join(",",@cursor_variables );
+	#print Dumper \@cursor_variables;
+	#print $cursor_variables_flow;
+	
+	
+	
+	my ($select_chunk)=$sql_code=~m/SELECT\s+(.*?)FROM/s;
+	#$select_chunk=~s/\/\*\+ .*? *\///;
+
+	my @select_variables;
+        my (@select_arr_1);
+        my (@select_arr_2);
+        my (@select_into_arr_1);
+	my $select_ignore_flag;
+        my $substring_error_flag;
+	#print $select_chunk;	
+        
+        if($select_chunk=~m/SUBSTR/i){
+	   $select_chunk=~s/SUBSTR\(.*?\)//isg;
+           $substring_error_flag=1;
+        }
+	if ($select_chunk=~m/COUNT\(\*\)/ || $select_chunk=~m/\* INTO/ || $select_chunk=~m/(MIN\(|MAX\(|COUNT\(|SUM\(|AVG\(|NVL\().*?INTO/ || $select_chunk=~m/\/\*.*?\*\/\s*\*/){
+		$select_ignore_flag=1;
+	}
+	elsif($select_chunk!~m/INTO/){
+                #$select_chunk=~s/\/\*\s*INDEX.*?\*\///;
+                $select_chunk=~s/\/\*[\W]\s*INDEX.*?\*\/[\W]//;
+		if ($select_chunk =~m/,/){
+			my @temp_select_arr =split(/,/,$select_chunk );
+			push @select_variables,@temp_select_arr;
+			#print Dumper @temp_select_arr;
+		}
+		else{
+			push @select_variables,$select_chunk;
+			
+		}
+
+	}
+	elsif($select_chunk=~m/INTO/){
+		#print "\nI AM HERE 3\n";
+		$select_chunk=~s/\/\*.*?\*\///sg;
+                my($select_part_1)=$select_chunk=~m/^(.*?)INTO/s;
+                my($select_part_2)=$select_chunk=~m/INTO(.*)/s;
+		#print "\n$select_part_1\n";
+		#print "\n$select_part_2\n";
+                if ($select_part_1 =~m/,/){
+                        my @temp_select_arr =split(/,/,$select_part_1 );
+                        push @select_arr_1,@temp_select_arr;
+                }
+                else{
+                        push @select_arr_1,$select_part_1;
+
+                }
+                if ($select_part_2 =~m/,/){
+                        my @temp_select_arr =split(/,/,$select_part_2 );
+                        push @select_arr_2,@temp_select_arr;
+                }
+                else{
+                        push @select_arr_2,$select_part_2;
+
+                }
+
+        }
+	##for matching the variables in into with where variables
+	my ($select_into_chunk)=$select_chunk=~m/INTO(.*)/s;
+	if ($select_into_chunk =~m/,/){
+                        my @temp_select_into_arr =split(/,/,$select_into_chunk );
+                        push @select_into_arr_1,@temp_select_into_arr;
+                }
+                else{
+                        push @select_into_arr_1,$select_into_chunk;
+
+                }
+	
+	@select_variables= map { $_=~ s/^\s+|\s+$//g ; $_ } @select_variables;	
+	@select_into_arr_1= map { $_=~ s/^\s+|\s+$//g ; $_ } @select_into_arr_1;	
+	#print Dumper \@select_variables;	
+	#print Dumper \@select_into_arr_1;	
+	
+	my @variables_flow;
+	my @variables_in_where;
+	my @flow_of_variables;
+	my @sql_variables;
+	my @sql_key_variables;
+	my @variables_right_in_where;
+
+	print OP "\n\n----------------------------SQL CODE BLOCK-----------------------------------\n";
+	print OP "$sql_code\n";
+	my ($table_name)=$sql_code=~m/FROM\s+(.*?)(?:\s|$)/;
+        if ($table_name=~m/_/){
+            $table_name = substr($table_name, -4);
+        }
+	print OP "\n-----------------------------------------------------------------------------\n";
+	
+        if ($table_name eq ""){
+           print OP "No SQL Table found in query,Manually verify this SQL block\n";
+	   next;
+	}
+	print OP "TABLE NAME : $table_name\n";
+        chomp($table_name);
+        if(grep /^$table_name$/, @day_night_tables){
+            print OP "Day & Night mode is enabled for table, Kindly verify manually that Day & Night mode both have been handled mandatorily in program.\n";
+        }
+        else{
+            print OP "Table not in list, Kindly contact DBA team for table details and verify manually that Day & Night mode both to be handled mandatorily in program or not\n";
+        }
+ 
+        if ($sql_code!~m/where/i){
+           print OP "There is no condition to match for Tool,Manually verify this SQL block\n";
+           next;
+        }       
+
+	if ($nested_size > 1){
+		print OP "\n!!! KINDLY CHECK FOR NESTED QUERY !!!\n";
+		next;	
+	}
+
+	if ($DBFILTBL_file_content=~m/VALUE "\s*$table_name\s*"/){
+		print OP "Table $table_name is present in DBFILTBL table kindly use DBIO instead of select query.\n";
+	}
+	
+	my ($index_name)=$sql_code=~m/[INDEX|INDEX_ASC]\(.*? (.*?)\)/;
+	
+	if ($index_name){
+		print OP "INDEX NAME : $index_name\n";
+	}
+	elsif($DBFILTBL_file_content=~m/VALUE "\s*$table_name\s*"/ && !$index_name){
+		print OP "Table $table_name is present in DBFILTBL table so index is mandatory.\n";
+	}
+	else{
+		print OP "Index not found , manually verify the Index\n";
+	}
+
+	
+	# Extract the part after WHERE clause
+	if ($sql_code =~m/WHERE(.*)/s) {
+		my $where_part = $1;
+	
+	# Find all variable-value pairs in the WHERE part (all except which includes between)
+	while ($where_part =~m/^\s*(?:AND|\s*|\()\s*\b(\w+)\b\s*(?:=|>|<|>=|<=|!=|<>|\s+LIKE\s+|\s+IN[\s+|\s*\(])\s*(.*?)(?:$|\s+)/gm ) {
+		my $variable = $1;
+		my $value = $2;
+		#print "$variable -> $value\n";
+		push @variables_in_where,"$variable -> $value";
+		push @variables_flow,$variable;
+		push @variables_right_in_where,$value;
+	}
+
+	# Find all variable-value pairs in the WHERE part that includes between keyword
+	while ($where_part =~m/^\s*\b(\w+)\b\s*(?:\s+BETWEEN\s+)\s*(.*?)\s*AND\s*(.*?)(?:\s+|$)/gm) {
+		my $variable = $1;
+		my $value = $2;
+		my $value1 = $3;
+		push @variables_in_where,"$variable -> $value <o> $value1";
+		push @variables_flow,$variable;
+		push @variables_right_in_where,$value;
+		push @variables_right_in_where,$value1;
+
+	}
+        
+        # Find all variable-value pairs in the WHERE part (all except which includes between)
+	while ($where_part =~m/^\s*(SUBSTR.*?)(?:=|>|<|>=|<=|!=|<>|\s+LIKE\s+|\s+IN[\s+|\s*\(])\s*(.*?)(?:$|\s+)/gm) {
+		my $variable = $1;
+		my $value = $2;
+		#print "$variable -> $value\n";
+		push @variables_in_where,"$variable -> $value";
+		push @variables_flow,$variable;
+		push @variables_right_in_where,$value;
+	}
+
+	}
+
+	#print Dumper \@variables_in_where;
+	#print Dumper \@variables_flow;
+	#print Dumper \@variables_right_in_where;
+
+
+	my $cobol_sql_query_var_flow=join(",",@variables_flow);
+	#my $sql_filename=`grep "CREATE TABLE $table_name" /fns/d0/r/sql/*.sql`;
+	my $sql_filename="/fns/d0/r/sql/".lc($table_name).".sql";
+	$sql_filename=~s/:.*//isg; 
+	$sql_filename =~ s/^\s+|\s+$//g;	
+	if ($sql_filename){
+		print OP "SQL FILENAME : $sql_filename\n";
+	}
+	else{
+		print OP "corresponding sql file not found\n";
+		next;	
+	}
+	
+        my $sql_file_content;
+	if (-e $sql_filename){ 	
+	     open(my $ft,'<',$sql_filename) or die "Can't open file $!";
+	     $sql_file_content = do { local $/; <$ft> };
+	     close $ft;
+	}
+	else{
+	    print OP "SQL file [$sql_filename] does not exist\n";
+	    next; 
+	}
+
+
+	
+	
+
+        #index code checking if index is present in code or not
+        #if present then it will match the flow of index with sql file index flow. 
+	if (defined $index_name && $index_name ne ""){
+		my ($index_chunk)=$sql_file_content=~m/CONSTRAINT\s*$index_name.*?\((.*?)\)/s;
+		@flow_of_variables=split(/,/,$index_chunk);	
+		@flow_of_variables= map { $_=~ s/^\s+|\s+$//g ; $_ } @flow_of_variables;
+
+
+		my %hash;
+		$hash{$_}= 1 for @flow_of_variables;
+		my @diff=grep{!$hash{$_}} @variables_flow;
+
+		my $sql_sql_query_var_flow=join(",",@flow_of_variables);
+
+		print OP "\nSQL FLOW : $sql_sql_query_var_flow\n";
+		print OP "COBOL FLOW : $cobol_sql_query_var_flow\n";
+		if ($cursor_variables_flow){
+			print OP "CURSOR FLOW : $cursor_variables_flow\n";
+			if ($cursor_variables_flow =~m/$cobol_sql_query_var_flow/){
+				print OP "\n--- cursor FLOW MATCHED ---\n";
+			}else{
+				print OP "\n--- cursor FLOW NOT MATCHED  ---\n";
+		}
+		}
+		if ($sql_sql_query_var_flow=~m/$cobol_sql_query_var_flow/){
+			print OP "\n--- FLOW MATCHED ---\n";
+		}else{
+			print OP "\n--- FLOW NOT MATCHED  ---\n";
+		}
+
+
+
+		if (@diff){
+			for my $a(@diff){
+				print OP "key mismatch , $a not present in index variables\n";
+			}
+		}
+
+	}
+
+
+	#working on SQL file data.pushing the sql file variables in sql_variables array 
+	foreach my $line (split(/\n/, $sql_file_content)){
+		$line=~s/^\W*//g;	
+		if ($line =~m/\s+char\s*/i || $line =~m/\s+number\s*/i || $line =~m/\s+varchar\s*/i ) {
+			if($line=~ m/^\s*(\w*)\s*(\w*)\s*\((.*?)\)/){
+					my $temp_var3=$1;
+					my $temp_var4=$2;
+					my $temp_var5=$3;
+					push @sql_variables, "$temp_var3 -> $temp_var4 ($temp_var5)";
+				}
+			}
+		}
+			##getting keys from sql file
+		my(@vars_31)=$sql_file_content=~m/CONSTRAINT.*?\((.*?)\)/gs;
+		for my $temp_key_variables (@vars_31){
+		 if ($temp_key_variables =~m/,/){
+			my @temp_key_variables_arr=split(/,/,$temp_key_variables);
+			push @sql_key_variables,@temp_key_variables_arr;
+		}
+		else{
+			push @sql_key_variables,$temp_key_variables;
+			
+
+		}
+	}
+	@sql_key_variables= map { $_=~ s/^\s+|\s+$//g ; $_ } @sql_key_variables;	
+	#print Dumper \@sql_key_variables;
+	#print OP Dumper \@sql_variables;
+	#print Dumper \@variables_in_where;
+	#print Dumper \@select_variables;
+	
+
+	print OP "\n--------------------------SELECT QUERY MATCHING---------------------------------\n";
+	
+	for my $temp_var(@select_into_arr_1){
+	  $temp_var=~s/^\s*://;
+	  if (grep /^$temp_var$/, @variables_in_where) {
+                           print OP "variable $temp_var is present in INTO part also and in WHERE part also which is invalid.\n";
+                        }
+	}
+
+	if ($select_ignore_flag eq 1){
+		print OP "kindly Manually verify SELECT statement as it conatains SQL KEYWORDS";
+		
+	}
+        
+        ## checks if the there is any substriing in select section.
+	if ($substring_error_flag eq 1){
+		print OP "Substring is used in select section,Substring should not be used.";
+		
+	}
+
+	my $len1=@select_arr_1;
+	my $len2=@select_arr_2;
+	if ($len1 eq $len2){
+	for my $i(0..$len1-1){
+		my $st_v1=$select_arr_1[$i];
+		my $st_v2=$select_arr_2[$i];
+		$st_v1 =~ s/^\s+|\s+$//g;
+		$st_v2 =~ s/^\s+|\s+$//g;
+		$st_v1 =~ s/^\s*://;
+		$st_v2 =~ s/^\s*://;
+		my $rv1 = match_the_two($st_v1,$st_v2,@sql_variables);
+                if ($rv1=~m/mismatched/){
+                       print OP "$st_v1 , $st_v2 , $rv1\n";
+                }
+	
+	
+	}
+	}
+	else{
+
+	}
+
+	for my $sql_select_temp (@select_variables){
+		next if ($sql_select_temp eq "");
+                if($sql_select_temp =~m/SUBSTR/){
+ 		   print OP "variable \"$sql_select_temp\",substring cannot be present in variable \n"; 
+                   next;
+                }
+                
+		if (!grep /^$sql_select_temp\s+/, @sql_variables) {
+ 		   print OP "Select query variable, $sql_select_temp is not present in sql file \n"; 
+		}
+                if ($sql_select_temp=~m//s){
+ 		   print OP "substring cannot be present in variable \n"; 
+                }
+	} 
+	
+	print OP "\n--------------------------WHERE QUERY MATCHING----------------------------------\n";
+        
+        ##looping on variables present in where section and process them    
+	for my $t_v1(@variables_in_where){
+		if($t_v1=~m/^(.*?)->(.*)/){
+			my $t_v9=$1;
+			my $t_v2=$2;
+			$t_v9 =~ s/^\s+|\s+$//g;
+
+                        if ($t_v9 =~m/SUBSTR/){
+ 			   print OP "variable \"$t_v9\", Substring should not be used.\n";
+                           next; 
+                        }
+                        if ($t_v2 =~m/\|\|/){
+ 			   print OP "variable \"$t_v2\",  manually verify the variable.\n";
+                           next; 
+                        }
+
+
+
+			$t_v9 =~ s/^\s+|\s+$//g;
+			$t_v9 =~ s/^\s*\(//g;
+			$t_v9 =~ s/\)\s*$//g;
+			$t_v2 =~ s/^\s+|\s+$//g;
+			$t_v2 =~ s/\)\s*$//g;
+			$t_v2 =~ s/^\s*\(//g;
+			$t_v2 =~ s/^\s*://;
+			#print "\nFIRST: $t_v2  ";
+			#print "SECOND: $t_v9\n";
+			
+                        if ($t_v9 =~m/SUBSTR/){
+ 			   print OP "variable $t_v9, Substring should not be used.\n";
+                           next; 
+                        }
+                         
+                           
+
+			if (!grep /^$t_v9$/, @sql_key_variables) {
+ 			   print OP "variable $t_v9 is not part of any key field which creates performance impact.\n"; 
+			}
+
+		        ##splitting variable names and their values for processing.	
+			if ($t_v2=~m/<o>/){
+				my @t_a1=split(/<o>/,$t_v2);
+				my $rv1 = match_the_two($t_v9,$t_a1[0],@sql_variables); 
+				my $rv2 = match_the_two($t_v9,$t_a1[1],@sql_variables);
+				$t_a1[0]=~s/^\s*://;
+				$t_a1[1]=~s/^\s*://;
+				if ($rv1=~m/mismatched/){
+					print OP "$t_v9 , $t_a1[0] $rv1";
+				}
+				if ($rv2=~m/mismatched/){
+					print OP "$t_v9 , $t_a1[1] $rv2";
+				}
+			}
+			elsif($t_v2=~m/,/){
+				my @t_a1=split(/,/,$t_v2);
+				my $rv1 = match_the_two($t_v9,$t_a1[0],@sql_variables); 
+				my $rv2 = match_the_two($t_v9,$t_a1[1],@sql_variables);
+				$t_a1[0]=~s/^\s*://;
+				$t_a1[1]=~s/^\s*://;
+				if ($rv1=~m/mismatched/){
+					print OP "$t_v9 , $t_a1[0] , $rv1\n";
+				}
+				if ($rv2=~m/mismatched/){
+					print OP "$t_v9 , $t_a1[1] , $rv2\n";
+				}
+			}
+			else{
+				my $rv1 = match_the_two($t_v9,$t_v2,@sql_variables);
+				if ($rv1=~m/mismatched/){
+					print OP "$t_v9 , $t_v2 , $rv1\n";
+				}
+			} 
+		}
+	}
+    };
+
+    # Check for errors
+    if ($@) {
+        print ER "Error processing sql: $@\n";  # Print the error message
+        print OP "\n!!! ERROR PROCESSING SQL: $@ \n";  # Print the error message
+    }
+}
+close ER;
+close OP;
+print "\nOutput_file: $output_file\n";
+if (-e $error_file && -s $error_file > 0){
+print "Error_file: $error_file\n\n";
+}
+else{
+print "\n";
+
+}
+
+sub match_the_two{
+	my ($first,$second,@sql_variables)=@_;
+  	my $flag=0;	
+	my $datatype_1;
+	my $datatype_2;
+	my $length_1;
+	my $length_2;
+	$second=~s/^\s*://;
+	$first =~ s/^\s+|\s+$//g;
+	$second =~ s/^\s+|\s+$//g;
+
+	my ($temp_first) = grep(/^$first\s*->/,@sql_variables);
+        if ($temp_first){
+        ($datatype_1)=$temp_first=~m/->\s*(.*?)\(/;
+        ($length_1)=$temp_first=~m/\((.*?)\)/;
+        #print"$temp_first $datatype_1 ------- $length_1\n";
+        }
+        else{	
+		$flag=1;
+                #print "variable $first not found in sql file , manually verify\n";
+                #return 0;
+        }
+	
+
+	if ($second=~m/'|"/){
+		$datatype_2="X";
+		$second=~s/['|"]//isg;
+		$length_2= length($second);
+		#print"$second -- $datatype_2 ------- $length_2\n";
+	}
+        elsif ($second=~m/^\d+$/){
+                $datatype_2="9";
+                $second=~s/['|"]//isg;
+                $length_2= length($second);
+                #print"$second -- $datatype_2 ------- $length_2\n";
+        }
+
+	else{
+		my ($temp_second) = grep(/^$second\s*-1>/,@cobol_variables);
+		if ($temp_second){
+			($datatype_2)=$temp_second=~m/-1>\s*(.*?)-2>/;
+			($length_2)=$temp_second=~m/-2>(.*)/;
+			#print"$temp_second -- $datatype_2 ------- $length_2\n";
+		}
+		else{
+			if ($flag eq 0){
+			$flag=2;
+			}
+			elsif($flag eq 1){
+			$flag=3;
+			}
+			#print "variable2 $second not found in Cobol/Pco file, manually verify\n";		
+			
+		}
+	}
+	if ($flag eq 1 ){
+		print OP "variable $first not found in sql file , manually verify\n";
+		return 0;
+
+	}
+	elsif($flag eq 2){
+		print OP "variable $second not found in Cobol/Pco file, manually verify\n";
+		return 0;
+	}
+	elsif($flag eq 3){
+		print OP "variable $first not found in sql file , manually verify & variable $second not found in Cobol/Pco file, manually verify \n";
+		return 0;
+	}
+	
+	
+        $datatype_2=~s/^\s+|\s+$//g;
+        $datatype_1=~s/^\s+|\s+$//g;
+	if (($datatype_1=~m/CHAR/ && $datatype_2=~m/^\s*X\s*$/) || ($datatype_1=~m/NUMBER/ && $datatype_2=~m/^\s*9\s*$/)){
+		#print "LENGTHS: -$length_1,-$length_2\n";
+		$length_1=~s/^\s*(0*)//;
+                $length_1=~s/^\s+|\s+$//g;
+		$length_2=~s/^\s*(0*)//;
+                $length_2=~s/^\s+|\s+$//g;
+		#print "LENGTHS: $length_1,$length_2\n";
+
+		if ($length_1 eq $length_2){
+		
+			return "Both datatype and length matched";
+		}
+		else{
+		
+			return "Length mismatched";
+		}
+	}
+	else{
+		#print "LENGTHS: $length_1,$length_2\n";
+                $length_1=~s/^\s*(0*)//;
+                $length_1=~s/^\s+|\s+$//g;
+                $length_2=~s/^\s*^(0*)//;
+                $length_2=~s/^\s+|\s+$//g;
+                if ($length_1 eq $length_2){
+
+                        return "Datatype mismatched and length matched";
+                }
+                else{
+
+                        return "Datatype mismatched and Length mismatched";
+                }
+	
+	}
+}
+
