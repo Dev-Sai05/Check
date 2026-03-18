@@ -1,0 +1,513 @@
+#!/usr/bin/perl
+#
+# Name :
+#      checkVarInit.pl
+#
+# Purpose:
+#      This program analyses COBOL source code from src folder.
+#      It will identify the variable Initialize or not with data type
+#
+# Description:
+#      This program analyses COBOL source code from src folder to find
+#      variable Initialize or not with data type
+#      0, 'N', "N", ZEROES, SPACES 
+#
+# How to run:
+#      See below - value of @MM
+#      checkVarInit.pl -if <Input file path> -d -of <Output file path>
+#
+#      checkVarInit.pl -if /fns/d/r/src/BR0000.COB -d
+#      or
+#      checkVarInit.pl -if /fns/d/r/src/BR0000.COB -d -of /home/fnsonld/out.txt
+#
+
+use Data::Dumper ;
+use Getopt::EvaP ;
+use Env;
+use File::Basename;
+
+my $inputfile ;
+my $outputfile ;
+my $debug ;
+my $irNumber = "";
+my $startIRPattern = "START\s+OF\s+IR\s+";
+my $endIRPattern = "END\s+OF\s+IR\s+";
+my %varHash = ();
+my @errorLines = () ;
+my $lineNum = 0;
+my $linkage_ln;
+my $working_ln;
+my %linkageInitHash= ();
+my %linkageUnInitHash= ();
+
+@PDT = split /\n/, <<end_of_PDT ;
+PDT
+
+inputfile, if:    string  = \$required
+outputfile, of:   string
+irnumber, irno:   string
+debug, d:         switch 
+
+PDTEND no_file_list
+end_of_PDT
+
+@MM = split /\n/, <<end_of_MM;
+.inputfile
+          input cobol file
+
+.outputfile
+          output file contain error and ok statments.
+
+.irnumber
+          IR Number for search for specific IR number changes.
+
+.debug
+          debug for print all conditions error and ok.
+
+end_of_MM
+
+
+
+
+my @cobolKeywords = qw(
+       ACCEPT ACCESS ADD ADDRESS ADVANCING AFTER ALPHABET ALPHABETIC
+       ALPHABETIC-LOWER ALPHABETIC-UPPER ALPHANUMERIC ALPHANUMERIC-EDITED ALS
+       ALTERNATE AND ANY ARE AREA AREAS ASCENDING ASSIGN AT AUTHOR BEFORE BINARY
+       BLANK BLOCK BOTTOM BY CANCEL CBLL CD CF CH CHARACTER CHARACTERS CLASS
+       CLOCK-UNITS CLOSE COBOL CODE CODE-SET COLLATING COLUMN COMMA COMMON
+       COMMUNICATIONS COMPUTATIONAL COMPUTE CONTENT CONTINUE
+       CONTROL CONVERTING CORR CORRESPONDING COUNT CURRENCY DATE DATE-COMPILED
+       DATE-WRITTEN DAY DAY-OF-WEEK DE DEBUG-CONTENTS DEBUG-ITEM DEBUG-LINE
+       DEBUG-NAME DEBUG-SUB-1 DEBUG-SUB-2 DEBUG-SUB-3 DEBUGGING DECIMAL-POINT
+       DELARATIVES DELETE DELIMITED DELIMITER DEPENDING DESCENDING DESTINATION
+       DETAIL DISABLE DISPLAY DIVIDE DIVISION DOWN DUPLICATES DYNAMIC EGI ELSE EMI
+       ENABLE END-ADD END-COMPUTE END-DELETE END-DIVIDE END-EVALUATE END-IF
+       END-MULTIPLY END-OF-PAGE END-READ END-RECEIVE END-RETURN
+       END-REWRITE END-SEARCH END-START END-STRING END-SUBTRACT END-UNSTRING
+       END-WRITE EQUAL ERROR ESI EVALUATE EVERY EXCEPTION EXIT
+       EXTEND EXTERNAL FALSE FD FILLER FINAL FIRST FOOTING FOR FROM
+       GENERATE GIVING GLOBAL GO GREATER GROUP HEADING HIGH-VALUE HIGH-VALUES I-O
+       IN INDEX INDEXED INDICATE INITIAL INITIALIZE
+       INITIATE INPUT INSPECT INSTALLATION INTO IS JUST
+       JUSTIFIED KEY LABEL LAST LEADING LEFT LENGTH LOCK MEMORY
+       MERGE MESSAGE MODE MODULES MOVE MULTIPLE MULTIPLY NATIVE NEGATIVE NEXT NO NOT
+       NUMBER NUMERIC NUMERIC-EDITED OCCURS OFF OMITTED ON OPEN
+       OPTIONAL OR ORDER ORGANIZATION OTHER OUTPUT OVERFLOW PACKED-DECIMAL PADDING
+       PAGE PAGE-COUNTER PERFORM PF PH PIC PICTURE PLUS POINTER POSITION POSITIVE
+       PRINTING PROCEDURES PROCEDD PROGRAM PURGE QUEUE QUOTES
+       RANDOM RD READ RECEIVE RECORD RECORDS REDEFINES REEL REFERENCE REFERENCES
+       RELATIVE RELEASE REMAINDER REMOVAL REPLACE REPLACING REPORT REPORTING
+       REPORTS RERUN RESERVE RESET RETURN RETURNING REVERSED REWIND REWRITE RF RH
+       RIGHT ROUNDED RUN SAME SD SEARCH SECTION SECURITY SEGMENT SEGMENT-LIMITED
+       SELECT SEND SENTENCE SEPARATE SEQUENCE SEQUENTIAL SET SIGN SIZE SORT
+       SORT-MERGE SOURCE STANDARD
+       STANDARD-1 STANDARD-2 START STATUS STOP STRING SUB-QUEUE-1 SUB-QUEUE-2
+       SUB-QUEUE-3 SUBTRACT SUM SUPPRESS SYMBOLIC SYNC SYNCHRONIZED TABLE TALLYING
+       TAPE TERMINAL TERMINATE TEST TEXT THAN THEN THROUGH THRU TIME TIMES TO TOP
+       TRAILING TRUE TYPE UNIT UNSTRING UNTIL UP UPON USAGE USE USING VALUE VALUES
+       VARYING WHEN WITH WORDS WRITE
+       CONTAINS
+       IF INVALID END EOP
+       ALL CALL
+       GOBACK
+       ) ;
+
+
+
+sub main(){
+
+    init();
+    getLineNumber();
+    if($irNumber eq "ALL"){
+        generateHash_variables();
+    }
+    else{
+        generateHash_variables_irspec();
+    }
+    #verify_move();
+    verify_move_new();
+    writeOutput();
+    print "\nRefer Output file : $outputfile\n";
+
+
+
+}
+
+sub getLineNumber()
+{
+my $lineNo = 0 ;
+
+    open(DATA, '<', "$inputfile") or die "Couldn't open $inputfile , $!";
+    while(<DATA>) {
+    $lineNo = $lineNo + 1 ;
+        if($_ =~ m/^...... LINKAGE SECTION/){
+
+            #print "LN::$lineNo:$_";
+            $linkage_ln=$lineNo;
+            #print "\nNew::$linkage_ln";
+        }
+        if($_ =~ m/^...... WORKING-STORAGE/){
+            #print "LN::$lineNo:$_";
+            $working_ln=$lineNo;
+            #print "\nNew::$working_ln";
+	}      
+    }
+    close(DATA);       
+}
+
+sub writeOutput(){
+
+    print OUTPUT "\n#Not Initialized Variables :\n\n";
+    print OUTPUT "#Line No|Variable Name|Data Type\n";
+    foreach my $entry (keys %varHash){
+        if($varHash{$entry}{'INIT'} == 0){ 
+	    if($varHash{$entry}{'LNO'} > $working_ln && $varHash{$entry}{'LNO'} < $linkage_ln){
+                print OUTPUT "$varHash{$entry}{'LNO'}|$entry|$varHash{$entry}{'VAL'}\n";
+	    }
+	    else{
+	        #print OUTPUT ".......====== $varHash{$entry}{'LNO'}|$entry|$varHash{$entry}{'VAL'}\n";
+		
+		my $lno = $varHash{$entry}{'LNO'};
+                my $val = $varHash{$entry}{'VAL'};
+		$linkageUnInitHash{$lno}="$entry|$val";	
+	    }
+        }
+    }   
+
+    print OUTPUT "\n\n\n#################### LINKAGE SECTION ##################\n";
+    print OUTPUT "\n\n#Not Initialized Variables      :LINKAGE SECTION ..\n\n\n";	
+    foreach my $linkVar (keys %linkageUnInitHash)
+    {
+        print OUTPUT "LINKAGE SECTION|$linkVar|$linkageUnInitHash{$linkVar}\n";
+    }
+
+
+    if($debug == 1){
+        print OUTPUT "\n\n#Initialized Variables :\n\n";
+        #print OUTPUT "#Line No|Variable Name|Data Type\n";
+        print OUTPUT "#Line No|Variable Name|Data Type|Out of scope\n";
+        foreach my $entry (keys %varHash){
+
+#--------------------------------------------------------
+            if($varHash{$entry}{'INIT'} == 1){
+            if($varHash{$entry}{'LNO'} > $working_ln && $varHash{$entry}{'LNO'} < $linkage_ln){
+	        #print "1111...:: varHash{entry}{'LNO'} :: $varHash{$entry}{'LNO'}  ==== $varHash{$entry}{'VAL'}\n\n";
+                print OUTPUT "Initialized|$varHash{$entry}{'LNO'}|$entry|$varHash{$entry}{'VAL'}\n";
+	    }
+            else{
+                #print "2222...:: varHash{entry}{'LNO'} :: $varHash{$entry}{'LNO'}  ==== $varHash{$entry}{'VAL'}\n\n";
+                #print OUTPUT "Initialized|$varHash{$entry}{'LNO'}|$entry|$varHash{$entry}{'VAL'}|OUT OF SCOPE (After LINKAGE SECTION)\n";
+
+               my $lno = $varHash{$entry}{'LNO'}; 
+               my $val = $varHash{$entry}{'VAL'}; 
+                #$linkageHash{$lno} .= "$entry|$val";
+		$linkageInitHash{$lno} .= "$entry|$val";
+            }
+            }
+        }
+    
+
+    print OUTPUT "\n\n\n\n#Initialized Variables ..LINKAGE SECTION ########\n\n\n";	
+    foreach my $linkVar (keys %linkageInitHash)
+    {
+        print OUTPUT "LINKAGE SECTION|$linkVar|$linkageInitHash{$linkVar}\n";
+    }
+   
+  # print Dumper \%linkageHash;
+   
+    
+    } 
+
+    close(OUTPUT);
+}
+
+
+sub init(){
+
+    &EvaP( \@PDT, \@MM, \%cmdarg );
+    $inputfile  = $cmdarg{'inputfile'} ;
+    $outputfile  = $cmdarg{'outputfile'} ;
+    $irNumber  = $cmdarg{'irnumber'} ;
+    $debug  = $cmdarg{'debug'} ;
+
+
+    if(!-e $inputfile || !-r $inputfile){
+        print "$inputfile not exists or readable\n";
+        exit;
+    }
+
+    if($irNumber eq ""){
+        $irNumber = "ALL";
+    }
+
+    if($outputfile eq ""){
+        my $inpFileName = basename($inputfile);
+        $outputfile = "/tmp/$LOGNAME/$inpFileName\_Init.err";
+    }
+    chomp($inputfile) if($inputfile);
+    chomp($outputfile) if($outputfile);
+    chomp($irNumber) if($irNumber);
+ 
+    print "\nInput File : $inputfile\nOutput File : $outputfile\nDeubg : $debug\nIr Number : $irNumber\n";
+    open(OUTPUT, '>', "$outputfile") or die $!;  
+}
+
+
+sub generateHash_variables(){
+
+    my $var = "";
+    my $datatype = "";
+    my $startFlag = 0 ;
+    my $lineNo = 0 ;
+    my $readFlag = 0 ;
+  
+    my $cmd = "awk '/ WORKING-STORAGE/{ f = 1 } f; /^...... LINKAGE SECTION|PROCEDURE DIVISION/{ f = 0 }' $inputfile";
+    #print "$cmd\n";
+
+    #open(DATA, "$cmd |") or die "Couldn't open $inputfile , $!";
+    open(DATA, '<', "$inputfile") or die "Couldn't open $inputfile , $!";
+    while(<DATA>) {
+       ($var, $datatype) = "";
+       $lineNo = $lineNo + 1 ;
+       if($_ =~ m/WORKING-STORAGE/){
+           #print "$lineNo:$_";
+           $readFlag = 1 ;
+       }
+   
+       next if($readFlag != 1);
+       if($readFlag == 1){
+           #next if($_ =~ m/^......\*/);
+
+
+           if($_ =~ m/^.*\s+\d{2}\s+(.*)\s+(PIC\s+.).*\./ && $_ !~ m/FILLER/){
+
+               my $key = $1 ;
+               my $value = $2 ;
+
+               $key=~ s/^\s+|\s+$//g;
+               $value=~ s/^\s+|\s+$//g;
+
+               $value=~ s/\s+/ /g;
+
+               chomp($key);
+               chomp($value);
+
+               $varHash{$key}->{'VAL'} = $value ;
+               $varHash{$key}->{'INIT'} = 0 ;
+               $varHash{$key}->{'LNO'} = $lineNo ;
+           }
+           elsif($_ =~ m/(......)\s+01\s+([A-Z0-9\-]+)\.\s*$/){
+               print OUTPUT "Kindly verfiy variable manually : $2\n";               
+           }
+       }
+       #if($_ =~ m/^...... LINKAGE SECTION|PROCEDURE DIVISION/){
+       if($_ =~ m/^...... PROCEDURE DIVISION/){
+           #print "$lineNo:$_";
+           last ;
+       }
+ 
+    }
+    close(DATA);
+
+}
+
+
+
+sub generateHash_variables_irspec(){
+
+    my $var = "";
+    my $datatype = "";
+    my $startFlag = 0 ;
+    my $lineNo = 0 ;
+    my $readFlag = 0 ;
+
+    #my $cmd = "awk '/ WORKING-STORAGE/{ f = 1 } f; /^...... LINKAGE SECTION|PROCEDURE DIVISION/{ f = 0 }' $inputfile | awk '/START OF IR $irNumber|START OF CR $irNumber/{ f = 1 } f; /END OF IR $irNumber|END OF CR $irNumber/{ f = 0 }'";
+    my $cmd = "cat -n $inputfile | awk '/ WORKING-STORAGE/{ f = 1 } f; /^...... LINKAGE SECTION|PROCEDURE DIVISION/{ f = 0 }' | awk '/START OF IR $irNumber|START OF CR $irNumber/{ f = 1 } f; /END OF IR $irNumber|END OF CR $irNumber/{ f = 0 }'";
+    #my $cmd = "cat -n $inputfile | awk '/ WORKING-STORAGE/{ f = 1 } f; /^...... LINKAGE SECTION|PROCEDURE DIVISION/{ f = 0 }' | awk '/START[[:space:]]+OF[[:space:]]+IR[[:space:]]+$irNumber|START OF CR $irNumber/{ f = 1 } f; /END[[:space:]]+OF[[:space:]]+IR[[:space:]]+$irNumber|END OF CR $irNumber/{ f = 0 }'";
+    #print "$cmd\n";
+
+    open(DATA, "$cmd |") or die "Couldn't open $inputfile , $!";
+    while(<DATA>) {
+       $lineNo = 0 ;
+       ($var, $datatype) = "";
+           #next if($_ =~ m/^......\*/);
+           #if($_ =~ m/^ (\d+)	.*\s+\d{2}\s+(.*)\s+(PIC\s+.).*\./){
+           #if($_ =~ m/^.*\s+\d{2}\s+([A-Z0-9\-]+)\s+(PIC\s+.).*\./ && $_ !~ m/FILLER/){
+           if($_ =~ m/^\s*(\d+)\s+.*\s+\d{2}\s+([A-Z0-9\-]+)\s+(PIC\s+.).*\./ && $_ !~ m/FILLER/){
+               $lineNo = $1 ;
+               my $key = $2 ;
+               my $value = $3 ;
+
+               $key=~ s/^\s+|\s+$//g;
+               $value=~ s/^\s+|\s+$//g;
+
+               $value=~ s/\s+/ /g;
+
+               chomp($key);
+               chomp($value);
+               chomp($lineNo);
+ 
+               #print "-$lineNo---$key-----$value\n";
+
+               $varHash{$key}->{'VAL'} = $value ;
+               $varHash{$key}->{'INIT'} = 0 ;
+               $varHash{$key}->{'LNO'} = $lineNo ;
+           }
+           elsif($_ =~ m/(......)\s+01\s+([A-Z0-9\-]+)\.\s*$/){
+               print OUTPUT "Kindly verfiy variable manually : $2\n";               
+           }
+
+    }
+    close(DATA);
+
+#print Dumper %varHash ;
+
+}
+
+
+
+sub verify_move_new(){
+
+    my $var ;
+    my $src ;
+    my $dest ;
+    my $lineSt = "";
+    my $lineNo = 0 ; 
+    my $starting_current_position ;
+    my $last_position ;
+    my $i = -1;
+
+    open(DATA, '<', $inputfile) or die "Couldn't open $inputfile , $!";
+    chomp(my @lines = <DATA>);
+    close(DATA);
+
+    #for($i = 0; $i < $#lines; $i = $i + 1) {
+    while($i < $#lines) {
+       $i = $i + 1 ;
+   
+               #print "$lines[$i]-------------\n" if ($lines[$i] =~ m/WA-OUTPUT-ERR-MSG-NO/);
+       #if($lines[$i] =~ m/^......\*/){
+       #    $i = $i + 1 ;
+       #    next ;
+       #}
+
+        if ($lines[$i] =~ m/INITIALIZE/) {
+           #print "I----$lines[$i]\n";
+           #my ($var) = ( $lines[$i] =~ /^......\s+INITIALIZE\s+([a-zA-Z0-9\-]+)\s*.*/ );
+           my ($var) = ( $lines[$i] =~ /^......\s+INITIALIZE\s+([a-zA-Z0-9\-\.]+)\s*.*/ );
+
+           $var =~ s/\.//;
+
+	   #print "$lines[$i]------\n";
+ 
+           if(defined($varHash{$var})){
+               $varHash{$var}->{'INIT'} = 1 ;
+           } 
+
+           while(1){
+	       #print "------------------$lines[$i]--------------\n";
+	       #if ($lines[$i] !~ m/^......\s+MOVE|^......\s+INITIALIZE/) {
+	       #    print "Exit........................\n";
+	       #    last;
+	       #}
+               $i=$i+1;
+               chomp($lines[$i]);
+               #if($lines[$i] =~ m/^......\*/){
+               #    next ;
+               #}
+	   #my ($var) = ( $lines[$i] =~ /^......\s*([a-zA-Z0-9\-]+)\s*.*/ );
+               my ($var) = ( $lines[$i] =~ /^......\s*([a-zA-Z0-9\-]+)\s.*$/ );
+               chomp($var);
+	       #print "$var-------------\n" if($var =~ m/LS-AWTC-ERROR-MSG-FLAG/);
+               if( grep( /$var/, @cobolKeywords) || $var =~ m/EXIT/){
+		   # print "Exit........................\n";
+                   last ;
+               }
+               chomp($lines[$i]);
+               #if(defined($varHash{$var})){
+               #print "$var-------------\n" if ($var =~ m/WA-OUTPUT-ERR-MSG-NO/);
+               if(defined($varHash{$var}) && $varHash{$var}{'INIT'} == 0){
+               #print "$var-------------\n" if ($var =~ m/WA-OUTPUT-ERR-MSG-NO/);
+                   $varHash{$var}->{'INIT'} = 1 ;
+                   #$i=$i+1;
+               }
+           }
+           if($lines[$i] =~ m/^......\s+MOVE|^......\s+INITIALIZE/){
+               $i=$i-1;
+           }
+
+        }
+        elsif($lines[$i] =~ m/^......\s+MOVE/){
+           chomp($lines[i]);
+  
+           my ($src, $dest) = ( $lines[$i] =~ /^......\s+MOVE\s+(.*)\s+TO\s+(.*)\s*/ );
+           chomp($src);
+           chomp($dest);
+           $src =~ s/^\s+|\s+$//g;
+           $dest =~ s/^\s+|\s+$//g;
+           #if($src =~ m/^0$|\'N\'|\"N\"|ZEROES|ZEROS|ZERO|SPACES|SPACE/){
+           if($src =~ m/^0$|\'N\'|\"N\"|ZEROES|ZEROS|ZERO|SPACES|SPACE|\' \'|\" \"/){
+
+               chomp($src);
+               chomp($dest);
+               $src =~ s/^\s+|\s+$//g;
+               $dest =~ s/^\s+|\s+$//g;
+               
+               if(defined($varHash{$dest})){
+                   my $ch = validateVar($src, $dest);
+                   $varHash{$dest}->{'INIT'} = 1 if ($ch !~ "ERR");
+               }
+ 
+               #print "4---------------------------------------------------------------$lines[$i]\n";
+               $i=$i+1;
+               #print "5---------------------------------------------------------------$lines[$i]\n";
+               chomp($lines[$i]);
+
+               while(1 && ($lines[$i] !~ m/^......\s+MOVE|^......\s+INITIALIZE/)){
+                   #last if ($lines[$i] !~ m/^......\s+MOVE|^......\s+INITIALIZE/) ;
+                   $i=$i+1 ;
+                   chomp($lines[$i]);
+                   #if($lines[$i] =~ m/^......\*/){
+                   #    next ;
+                   #}
+
+                   my ($dest) = ( $lines[$i] =~ /^......\s*([a-zA-Z0-9\-]+)\s*.*/ );
+                   chomp($dest);
+
+                   if( grep( /$dest/, @cobolKeywords) || $dest =~ m/EXIT|MOVE/){
+                       #print "3---------------------------------------------------------------$lines[$i]\n";
+                       last ;
+                   }
+                   else{
+                       if(defined($varHash{$dest}) && $varHash{$dest}{'INIT'} == 0){
+                           my $ch = validateVar($src, $dest);
+                           $varHash{$dest}->{'INIT'} = 1 if ($ch !~ "ERR");
+                       }
+                       #$i=$i+1 ;
+                   }
+              }
+              if($lines[$i] =~ m/^......\s+MOVE|^......\s+INITIALIZE/){
+                   #print "2---------------------------------------------------------------$lines[$i]\n";
+                  $i=$i-1;
+              }
+           }
+       }
+    } 
+    close(DATA);
+}
+
+sub validateVar($$){
+    my $src = $_[0];
+    my $dest = $_[1];
+
+    #print "$src	$dest	$varHash{$dest}{'VAL'}\n";
+   
+    if($src =~ m/^0$|ZEROES|ZEROS|ZERO/ && ($varHash{$dest}{'VAL'} !~ /^(PIC 9|PIC Z|PIC S9|PIC \*|PIC S|PIC \-)$/)){
+         return "ERR";
+    }
+    elsif($src =~ m/\'N\'|\"N\"|SPACES|SPACE/ && ($varHash{$dest}{'VAL'} !~ /^(PIC X)$/)){
+        return "ERR";
+    }
+}
+
+main();
