@@ -1,0 +1,246 @@
+#!/usr/bin/perl
+# Name :
+#      ChkParaProgramId.pl
+#
+# Purpose:
+#      This program analyses COBOL source code from input file.
+#      and match PROGRAM ID from input file.
+#
+# Description:
+#      This program analyses COBOL source code from input file.
+#      and match PROGRAM ID from input file and check PARA in input file.
+#
+#
+# How to run:
+#      See below - value of @MM
+#      ChkParaProgramId.pl -if <Input file path>
+#
+#      ChkParaProgramId.pl -if IN0000.COB
+
+use Data::Dumper ;
+use Getopt::EvaP ;
+use Env;
+use File::Basename;
+
+my $inputfile ;
+my $outputfile ;
+my $irNumber;
+my $exceptwd_program;
+my $program_id;
+my $program_name;
+my $parameter;
+my $section_name;
+my $section_name1;
+my %found_params = ();
+my $irNumber;
+
+@PDT = split /\n/, <<end_of_PDT ;
+PDT
+
+inputfile, if:    string  = \$required
+outputfile, of:   string
+irnumber, irno:   string
+debug, d:         switch
+
+PDTEND no_file_list
+end_of_PDT
+@MM = split /\n/, <<end_of_MM;
+.inputfile
+          input cobol file
+
+.outputfile
+          output file contain error and ok statments.
+
+.irnumber
+          IR Number for search for specific IR number changes.
+
+.debug
+          debug for print all conditions error and ok.
+
+
+end_of_MM
+
+#------------------------------------------------------------------------------
+# Name   : main
+# Purpose: To call all the functions
+# Input  :
+# Output
+
+
+sub main()
+{
+    init();
+    if($irNumber eq "ALL"){
+      Program_ID();
+      PARA();
+    }
+    else{
+    generateHash_variables_irspec();
+    }
+}
+#--------------------------------------------------------------------------
+# Name   :intialize
+# Purpose:To initialize the parameter of the script
+# Input  :
+# Output :
+
+sub init(){
+
+    &EvaP( \@PDT, \@MM, \%cmdarg );
+    $inputfile  = $cmdarg{'inputfile'} ;
+    $outputfile  = $cmdarg{'outputfile'} ;
+    $irNumber  = $cmdarg{'irnumber'} || "ALL";
+    $debug  = $cmdarg{'debug'} ;
+    if(!-e $inputfile || !-r $inputfile){
+        print "$inputfile not exists or readable\n";
+        exit;
+    }
+
+    if($outputfile eq ""){
+        my $inpFileName = basename($inputfile);
+        $outputfile = "/tmp/$LOGNAME/$inpFileName\_out.err";
+    }
+
+    chomp($inputfile) if($inputfile);
+    chomp($outputfile) if($outputfile);
+    chomp($irNumber) if($irNumber);
+}
+#--------------------------------------------------------------------------
+# Name   :Program_ID
+# Purpose:To fatch STRING/DISPLAY lines from input file and get program name than compare input file name if it is diffirent than show errors 
+# Input  :
+# Output :
+
+sub Program_ID(){
+   
+     open my $fh, '<', $inputfile or die "Could not open COBOL file: $!";
+     my @lines = <$fh>;
+     close $fh;
+     for my $line_num (0..$#lines) {
+     my $line = $lines[$line_num];
+     next if($line =~ m/^......\*/);
+     if($line =~ m/^......\*/){
+        $line_num +1;
+        next;
+        }
+#print Dumper(@lines);
+
+      if($line =~ m/PROGRAM-ID.\s+(\w+)/){
+       # print "line : $line\n";
+       # print "line : $inputfile\n";
+        $program_id = $1;
+    }
+       #if ($line =~ /(STRING|DISPLAY)\s*(\"|\')(|\s+|)([A-Z][A-Z]\d\d\d\d)\s*(:?)(\(?)\s*(\w+).*?/){
+       if ($line =~ /(STRING|DISPLAY)\s*(\"|\')(|\s+|)([A-Z][A-Z]....)\s*(:?)(\(?)\s*(\w+).*?/){
+         $program_name = $4;
+        if (defined $program_id && $program_name ne $program_id) {
+           print "Error: Program name '$program_name' does not match PROGRAM-ID '$program_id' at line " . ($line_num+1) . "\n";
+        }
+
+     }
+   }
+    my $fileName = basename($inputfile);
+    $fileName =~ s/\.COB$//;
+    #print "filename: $fileName\n" ;
+      if (defined $program_id && $fileName ne $program_id) {
+           print "Error: Program name '$fileName' does not match PROGRAM-ID '$program_id'\n";
+        }
+}
+sub PARA(){
+ 
+    open my $fh, '<', $inputfile or die "Could not open COBOL file: $!";
+    my @lines = <$fh>;
+    close $fh;
+    my $size = @lines;
+    for my $line_num (0..$#lines) {
+        my $data_line = $lines[$line_num];
+        next if($data_line =~ m/^......\*/);
+        if ($data_line =~ /(STRING|DISPLAY)\s*.*?".*?\((.*?)\)/){
+            $parameter = $2;
+            my $status=0;
+            for ($i = $line_num; $i >= 0; $i--) {
+
+                my $temp_line=$lines[$i];
+                #print "---- $i ------ $temp_line\n";
+                if ($temp_line =~ /^......\s+($parameter)/){
+                    $status=1;
+                }
+            } 
+            if ($status eq 0){
+                print "Error PARA '$parameter' not found before STRING statement on line ".($line_num+1)." \n";
+            }
+        }
+    }
+}
+
+
+sub generateHash_variables_irspec(){
+
+     open my $fh, '<', $inputfile or die "Could not open COBOL file: $!";
+     my @lines = <$fh>;
+     close $fh;
+     for my $line_num (0..$#lines) {
+    my $line = $lines[$line_num];
+    next if($line =~ m/^......\*/);
+    if($line =~ m/^......\*/){
+        $line_num +1;
+        next;
+
+        }
+      if($line =~ m/PROGRAM-ID.\s+(\w+)/){
+        $program_id = $1;
+    
+     }
+    }
+   
+    # print "program ID : $program_id\n";
+ 
+     my $startPattern = "START\\s+OF\\s+IR\\s+$irNumber|START\\s+OF\\s+CR\\s+$irNumber|START\\s+OF\\s+$irNumber|START\\s+OF\\s+$irNumber";
+     my $endPattern = "END\\s+OF\\s+IR\\s+$irNumber|END\\s+OF\\s+CR\\s+$irNumber|END\\s+OF\\s+$irNumber|END\\s+OF\\s+$irNumber";
+
+     my $cmd = "perl -ne '/$startPattern/i../$endPattern/i and print' $inputfile";
+   open(DATA, "$cmd |") or die "Couldn't open command , $!";
+      my @IRlines = <DATA>;
+     # print "arrays : @IRlines\n";
+   close DATA;
+       for my $line_num1 (0..$#IRlines) {
+        my $line = $IRlines[$line_num1];
+       next if($line =~ m/^......\*/);
+       if($line =~ m/^......\*/){
+        $line_num1 +1;
+        next;
+
+        }
+       # print "program ID : $program_id\n";
+       if ($line =~ /(STRING|DISPLAY)\s*(\"|\')(|\s+|)([A-Z][A-Z]....)\s*(:?)(\(?)\s*(\w+).*?/){
+
+         $program_name = $4;
+
+       #  print "program name:$program_name   programId : $program_id\n";
+        if (defined $program_id && $program_name ne $program_id) {
+           print "Error: Program name '$program_name' does not match PROGRAM-ID '$program_id' at line " . ($line_num+1) . "\n";
+        }
+
+     }
+   }
+     my $size = @lines;
+     for my $line_num (0..$#lines) {
+         my $data_line = $lines[$line_num];
+       next if($data_line =~ m/^......\*/);
+        if ($data_line =~ /(STRING|DISPLAY)\s*.*?".*?\((.*?)\)/){
+           $parameter = $2;
+           my $status=0;
+         for ($i = $line_num; $i >= 0; $i--) {
+
+           my $temp_line=$lines[$i];
+           if ($temp_line =~ /^......\s+($parameter)/){
+             $status=1;
+            }
+       }
+        if ($status eq 0){
+                print "Error PARA '$parameter' not found before STRING statement on line ".($line_num+1)." \n";
+            }
+}
+}
+}
+main();
