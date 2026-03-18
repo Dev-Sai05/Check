@@ -1,0 +1,135 @@
+#!/usr/bin/perl
+# Name :
+#      evalWhenOtherCheck.pl 
+#
+# Purpose:
+#      This program analyses COBOL source code from input file.
+#      and print 0/1 value for EVALUATE statement if WHEN OTHER statement not found/found IR specific.
+#
+# Description:
+#      This program analyses COBOL source code from input file.
+#      and print 0/1 value for EVALUATE statement if WHEN OTHER statement not found/found IR specific.
+#
+#
+# How to run:
+#      See below - value of @MM
+#      evalWhenOtherCheck.pl -if <Input file path> -irno <IR Number>
+#
+#      evalWhenOtherCheck.pl -if BR0000  -irno 22110165
+#
+
+use Data::Dumper ;
+use Getopt::EvaP ;
+use Env;
+use File::Basename;
+
+my $inputfile ;
+my $outputfile ;
+my $irNumber;
+my $count = 0 ;
+
+my @stack = () ;
+my %evaluateHash = () ;
+@PDT = split /\n/, <<end_of_PDT ;
+PDT
+
+inputfile, if:    string  = \$required
+irnumber, irno:   string
+
+PDTEND no_file_list
+end_of_PDT
+@MM = split /\n/, <<end_of_MM;
+.inputfile
+          input cobol file
+
+.irnumber
+          IR Number for search for specific IR number changes.
+
+end_of_MM
+
+
+sub main()
+{
+    init();
+    generateHash_variables_irspec();
+    showSummary();
+} 
+
+
+sub init(){
+
+    &EvaP( \@PDT, \@MM, \%cmdarg );
+    $inputfile  = $cmdarg{'inputfile'} ;
+    $irNumber  = $cmdarg{'irnumber'} || "ALL";
+
+    if(!-e $inputfile || !-r $inputfile){
+        print "$inputfile not exists or readable\n";
+        exit;
+    }
+
+    chomp($inputfile) if($inputfile);
+    chomp($outputfile) if($outputfile);
+    chomp($irNumber) if($irNumber);
+
+    print "\nInput File : $inputfile\nIr Number : $irNumber\n";
+}
+
+
+
+sub generateHash_variables_irspec(){
+
+    my $var = "";
+    my $datatype = "";
+    my $lineNo = 0;
+    my $cmd ; 
+
+    if($irNumber ne "" && $irNumber ne "ALL"){
+        my $startPattern = "START\\s+OF\\s+IR\\s+$irNumber|START\\s+OF\\s+CR\\s+$irNumber|START\\s+OF\\s+$irNumber|START\\s+OF\\s+$irNumber|START\\s+IR\\s+$irNumber";
+        my $endPattern = "END\\s+OF\\s+IR\\s+$irNumber|END\\s+OF\\s+CR\\s+$irNumber|END\\s+OF\\s+$irNumber|END\\s+OF\\s+$irNumber|END\\s+IR\\s+$irNumber";
+        $cmd = "cat -n $inputfile | perl -ne '/$startPattern/i../$endPattern/i and print' ";
+    }
+    elsif($irNumber eq "ALL"){
+        $cmd = "cat -n $inputfile";
+    }
+
+    open(DATA, "$cmd |") or die "Couldn't open command , $!";
+
+    while (my $line = <DATA>) {
+         chomp($line);
+         next if ($line =~ /^\s*\d+	......\*/ );
+  
+         if($line =~ m/\s+EVALUATE\s+/){ 
+             my ($lNo, $eval, $option) = ( $line =~ /^\s*(\d+)\s+......\s+(EVALUATE)\s+([a-zA-Z0-9\-]+)\s*/ );
+             $option = "$lNo:$option";
+             push(@stack, $option);
+             $evaluateHash{$option} = 0 ;
+         }
+         elsif($line =~ m/WHEN\s+OTHER/){
+             $evaluateHash{$stack[@stack-1]} = 1 ;
+         }
+         elsif($line =~ m/END-EVALUATE/){
+             my $popoed = pop(@stack);
+         }
+    }
+    close(DATA);
+}
+
+
+
+sub showSummary(){
+
+    print "\nLine:VariableName\n"; 
+    print "--------------------\n";
+
+    for my $key (keys (%evaluateHash)){
+        if($evaluateHash{$key} eq "0"){
+            printf "$key\n" ;
+        }  
+    }
+}
+
+END{
+    print "\nScript running completed.....\n";
+}
+
+main();
