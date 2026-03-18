@@ -1,0 +1,36 @@
+ 
+UTSMSG.COB
+
+badgotos.pl	-basedir /fns/d0/r/src	-rd $spool/	-rf BR2311_GOTO.out	-prog /fns/d0/r/src/UTSMSG.COB              
+checkVarInit_new.pl	-if /fns/d0/r/src/UTSMSG.COB	-of $spool/BR2311_INIT.out -ir 25100067
+ConditionsCheck.pl	-if /fns/d0/r/src/UTSMSG.COB	-of $spool/BR2311_IFEND.out -ir 25100067
+filehandlechk.pl	-if /fns/d0/r/src/UTSMSG.COB	-of $spool/BR2311_File.out -ir 25100067
+checkPara.pl	-if /fns/d0/r/src/UTSMSG.COB	-of $spool/BR2311_ParaExit.out -ir 25100067
+evalWhenOtherCheck.pl	-if /fns/d0/r/src/UTSMSG.COB -irno 25100067
+newTAT_chkVarMove.pl      -if /fns/d0/r/src/UTSMSG.COB  -of $spool/BR2311_mvvarchkf.out -irno 25100067 -f false
+newTAT_chkVarMove.pl      -if /fns/d0/r/src/UTSMSG.COB  -of $spool/BR2311_mvvarchkt.out -irno 25100067 -f true
+checkCallParam.pl	-if /fns/d0/r/src/UTSMSG.COB
+StringProgram.pl	-if /fns/d0/r/src/UTSMSG.COB
+dbioCheck.pl -if /fns/d0/r/src/UTSMSG.COB -d 		-of $spool/BR2311_dbio_check.out -irno 25100067
+ifValidationTool.pl	 -f /fns/d0/r/src/UTSMSG.COB  -o $spool/BR2311_ifcond.out -ir 25100067 
+unusedVarCheck.pl -if /fns/d0/r/src/UTSMSG.COB -of $spool/BR2311_unused.out -ir 25100067
+checkVarInit_Linkage.pl -if //fns/d0/r/src/UTSMSG.COB -of $spool/BR2311_linkage.out  -irno 25100067	
+
+BRSKIP.PCO
+
+badgotos.pl	-basedir /fns/d0/r	-rd $spool/	-rf BR2311_GOTO.out	-prog /fns/d0/r/dbora/pco/BRSKIP.PCO
+checkVarInit_new.pl	-if /fns/d0/r/dbora/pco/BRSKIP.PCO	-of $spool/BR2311_INIT.out -ir 25100067
+ConditionsCheck.pl	-if /fns/d0/r/dbora/pco/BRSKIP.PCO	-of $spool/BR2311_IFEND.out -ir 25100067
+filehandlechk.pl	-if /fns/d0/r/dbora/pco/BRSKIP.PCO	-of $spool/BR2311_File.out -ir 25100067
+checkPara.pl	-if /fns/d0/r/dbora/pco/BRSKIP.PCO	-of $spool/BR2311_ParaExit.out -ir 25100067
+evalWhenOtherCheck.pl	-if /fns/d0/r/dbora/pco/BRSKIP.PCO -irno 25100067
+newTAT_chkVarMove.pl	-if /fns/d0/r/dbora/pco/BRSKIP.PCO -of $spool/BR2311_mvvarchkf.out -irno 25100067 -f false
+newTAT_chkVarMove.pl	-if /fns/d0/r/dbora/pco/BRSKIP.PCO -of $spool/BR2311_mvvarchkt.out -irno 25100067 -f true
+checkCallParam.pl	-if /fns/d0/r/dbora/pco/BRSKIP.PCO
+StringProgram.pl	-if /fns/d0/r/dbora/pco/BRSKIP.PCO
+sql_checker.pl	-f /fns/d0/r/dbora/pco/BRSKIP.PCO
+dbioCheck.pl -if /fns/d0/r/dbora/pco/BRSKIP.PCO -d  -of $spool/BR2311_dbio_check.out -irno 25100067
+ifValidationTool.pl   -f /fns/d0/r/dbora/pco/BRSKIP.PCO -o $spool/BR2311_ifcond.out -ir 25100067
+unusedVarCheck.pl -if /fns/d0/r/dbora/pco/BRSKIP.PCO -of $spool/BR2311_unused.out -ir 25100067 
+checkVarInit_Linkage.pl -if /fns/d0/r/dbora/pco/BRSKIP.PCO -of $spool/BR2311_linkage.out  -irno 25100067
+
