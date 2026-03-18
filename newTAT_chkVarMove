@@ -1,0 +1,513 @@
+#!/usr/bin/perl
+#
+# How to run:
+#      See below - value of @MM
+#      newTAT_chkVarMove.pl -if <Input file path> -d -of <Output file path>[Optional]
+#
+#      newTAT_chkVarMove.pl -if /fns/d/r/src/BR0000.COB -d
+#      or
+#      newTAT_chkVarMove.pl -if /fns/d/r/src/BR0000.COB -d -of /home/fnsonld/out.txt
+#
+
+
+use Data::Dumper ;
+use Getopt::EvaP ;
+use Env;
+use File::Basename;
+
+my $inputfile ;
+my $outputfile ;
+my $debug ;
+my %varHash = ();
+my %varHashLine = ();
+my @errorLines = () ;
+my $lineNum = 0;
+my $irNumber ;
+my $cpFile_file_Path ;
+my $len;
+my $varLen;
+
+#my $mflistdir = "$mflist";
+my $mflistdir = "/fns/d0/r/mflist";
+#my $pcodir = "/fns/$REGION/r/dbora/pco";
+my $pcodir = "/fns/d0/r/dbora/pco";
+my $tmpUnCompressDir = "/tmp/$LOGNAME/TMPUNCOMP";
+use File::Copy;
+@PDT = split /\n/, <<end_of_PDT ;
+PDT
+
+inputfile, if:    string  = \$required
+outputfile, of:   string
+irnumber, irno:   string
+flag,       f :   string
+debug, d:         switch 
+
+PDTEND no_file_list
+end_of_PDT
+
+@MM = split /\n/, <<end_of_MM;
+.inputfile
+          input cobol file
+
+.outputfile
+          output file contain error and ok statments.
+
+.irnumber
+          IR Number for search for specific IR number changes.
+
+.debug
+          debug for print all conditions error and ok.
+
+
+end_of_MM
+
+# ------------------------------------------------
+# Main Function which calls the other functions
+
+
+sub main(){
+   # uncompressFile($inputfile);
+    init();
+
+    if($irNumber eq "ALL"){
+        generateHash_variables();
+        verify_move();
+    }
+    else{
+          #generateHash_variables_irspec(); 
+        if ($flag eq "true"){
+            generateHash_variables(); 
+            verify_move_IR();
+         }else{
+	     #print "-hhhhh\n";
+            generateHash_variables_irspec();
+            verify_move();
+          }
+    } 
+
+    #generateHash_variables();
+    #print "Array : @errorLines\n";
+      
+    foreach my $entry (@errorLines){
+       next if ($entry =~ /^\d{1,}:\s*$/);
+        print OUTPUT "$entry\n";
+    }
+    close(OUTPUT);                           
+    print "\nRefer Output file : $outputfile\n";
+}
+
+#------------------------------------------------
+# Function Initialization
+# Read the input parameter and initialize
+# the variables
+
+
+sub init(){
+
+    &EvaP( \@PDT, \@MM, \%cmdarg );
+    $inputfile  = $cmdarg{'inputfile'} ;
+    $outputfile  = $cmdarg{'outputfile'} ;
+    $irNumber  = $cmdarg{'irnumber'} || "ALL";
+    $debug  = $cmdarg{'debug'} ;
+    $flag  = $cmdarg{'flag'} ;
+  
+
+    if(!-e $inputfile || !-r $inputfile){
+        print "$inputfile not exists or readable\n";
+        exit;
+    }
+
+    my $cpFile = "/tmp/$LOGNAME/TMPUNCOMP/";
+
+   my ($filename)=$inputfile=~/([^\/]+)$/;
+    $cpFile_file_Path = "$cpFile$filename";
+
+    `cp -f $inputfile $cpFile_file_Path`;
+
+    #`uncompress $cpFile_file_Path`;
+
+   # $cpFile_file_Path =~ s/\.Z$//g;
+
+   # print "[$cpFile_file_Path]\n";
+  
+
+    if($outputfile eq ""){
+        my $inpFileName = basename($inputfile);
+        $outputfile = "/tmp/$LOGNAME/$inpFileName\_out.err";
+    }
+
+    $inputfile = $cpFile_file_Path ;
+
+    chomp($inputfile) if($inputfile);
+    chomp($outputfile) if($outputfile);
+    chomp($irNumber) if($irNumber);
+
+    print "\nInput File : $inputfile\nOutput File : $outputfile\nDebug : $debug\nIr Number : $irNumber\n";
+    open(OUTPUT, '>', "$outputfile") or die $!;  
+}
+
+#------------------------------------------------
+# Function generateHash_variables
+# To read the COBOL file and collect
+# the data of COBOL variables and its datatypes
+
+
+sub generateHash_variables(){
+
+    my $var = "";
+    my $datatype = "";
+
+     
+    open(DATA, '<', $cpFile_file_Path) or die "Couldn't open $cpFile_file_Path , $!";
+    while(<DATA>) {
+       ($var, $datatype) = "";
+       #next if($_ =~ m/^\d{6}\*/ || $_ =~ m/^......\*/);
+       next if($_ =~ m/^......\*/);
+
+       if($_ =~ m/^.*\s+\d{2}\s+(.*)\s+(PIC\s+.).*\./){
+
+           my $key = $1 ;
+           my $value = $2 ;
+           #my $varLen ;
+
+           $key=~ s/^\s+|\s+$//g;
+           $value=~ s/^\s+|\s+$//g;
+           $value=~ s/\s+/_/g;
+           #$value=~ s/^0{1,}//g;
+
+           if($_ =~ m/^.*\s+\d{2}\s+(.*)\s+(PIC\s+.)(\(\d+\))\./){
+               $varLen = $3 ;
+               $varLen =~ s/\(//;
+               $varLen =~ s/\)//;
+               $varLen =~ s/^\s+|\s+$//g;
+               $varLen=~ s/^0{1,}//g;
+               $value = $value . "_" . $varLen ;
+           }
+ 
+
+           chomp($key);
+           chomp($value);
+
+          #print "$key|$value|$varLen\n";
+          #print "$varLen\n";
+           $varHash{$key} = $value ;
+       }
+    
+       last if($_ =~ m/PROCEDURE\s+DIVISION\s+USING/);
+  
+    }
+    close(DATA);
+# print Dumper %varHash;
+
+
+}
+
+
+#-------------------------------------------------
+# Function generateHash_variables_irspec
+# To read the COBOL file and collect
+# the data of COBOL variables and its datatypes
+# for specific IR number
+
+sub generateHash_variables_irspec(){
+    my $var = "";
+    my $datatype = "";
+    my $lineNo = 0;
+    #my $cmd = "cat -n $inputfile | awk '/ WORKING-STORAGE/{ f = 1 } f; /^...... LINKAGE SECTION|PROCEDURE DIVISION/{ f = 0 }' | awk '/START OF IR $irNumber|START OF CR $irNumber/{ f = 1 } f; /END OF IR $irNumber|END OF CR $irNumber/{ f = 0 }'";
+  my $cmd = "cat -n $inputfile | awk '/WORKING-STORAGE|FILE SECTION/{ f = 1 } f; /^...... LINKAGE SECTION|PROCEDURE DIVISION/{ f = 0 }' | awk '/START OF IR $irNumber|START OF CR $irNumber/{ f = 1 } f; /END OF IR $irNumber|END OF CR $irNumber/{ f = 0 }'"; 
+
+open(DATA, "$cmd |") or die "Couldn't open command , $!";
+  
+ #     print "$cmd\n ";
+    while(<DATA>) {
+
+     ($var, $datatype) = "";
+       #next if($_ =~ m/^\d{6}\*/ || $_ =~ m/^......\*/);
+       next if($_ =~ m/^......\*/);
+
+       #if($_ =~ m/^.*\s+\d{2}\s+(.*)\s+(PIC\s+.).*\./){
+       if($_ =~ m/^.*\s+\d{2}\s+(.*)\s+(PIC\s+.).*/){
+
+           my $key = $1 ;
+           my $value = $2 ;
+           #my $varLen ;
+
+           $key=~ s/^\s+|\s+$//g;
+           $value=~ s/^\s+|\s+$//g;
+           $value=~ s/\s+/_/g;
+           #$value=~ s/^0{1,}//g;
+
+           #if($_ =~ m/^.*\s+\d{2}\s+(.*)\s+(PIC\s+.)(\(\d+\))\./){
+           if($_ =~ m/^.*\s+\d{2}\s+(.*)\s+(PIC\s+.)(\(\d+\))/){
+               $varLen = $3 ;
+               $varLen =~ s/\(//;
+               $varLen =~ s/\)//;
+               $varLen =~ s/^\s+|\s+$//g;
+               $varLen=~ s/^0{1,}//g;
+               $value = $value . "_" . $varLen ;
+           }
+
+
+           chomp($key);
+           chomp($value);
+
+          #print "$key|$value|$varLen\n";
+          #print "$varLen\n";
+           $varHash{$key} = $value ;
+       }
+
+       last if($_ =~ m/PROCEDURE\s+DIVISION\s+USING/);
+
+    }
+    close(DATA);
+
+
+    #print Dumper \%varHash;
+
+}
+
+#--------------------------------------------------
+# Function validateVariables
+# Validate the source and destination variables
+# and their data types
+
+
+sub validateVariables($$$){
+
+    my $srcVar = $_[0] ;
+    my $destVar = $_[1] ;
+    my $lineNum = $_[2] ;
+    my $ret ;
+    
+   # if($srcVar !~ m/\d+|\'.*\'|\".*\"|ZEROES|ZEROS|ZERO|SPACES|SPACE/ && !defined($varHash{$srcVar})){
+   if($srcVar =~ m/\d+|\'.*\'|\".*\"/){
+      $srcVar =~ s/'|"//g;
+      #$len = length($srcVar);
+      #$srcVar = $srcVar ."_".$len;
+     # print "src : $srcVar \n";
+    
+    }
+    #print "$varHash{$srcVar} , $varHash{$destVar}";
+    if($varHash{$srcVar} eq $varHash{$destVar}){
+
+
+        $ret = "OK $srcVar:$varHash{$srcVar}  $destVar:$varHash{$destVar}";
+    }
+    else{
+                 
+	#      if ($varHash{$srcVar}){
+        if ($varHash{$srcVar} || $varHash{$destVar}){
+        if ((($varHash{$srcVar}=~m/PIC_9/ && $varHash{$destVar}!~m/PIC_9/)) || (($varHash{$srcVar}=~m/PIC_X/ && $varHash{$destVar}!~m/PIC_X/ )) || (($varHash{$srcVar}=~m/PIC_S/ && $varHash{$destVar}!~m/PIC_S/))){
+
+        $ret = "ERR $srcVar:$varHash{$srcVar}  $destVar:$varHash{$destVar}";
+        }
+        }
+        elsif(($srcVar =~m/\d{1,}/ && $varHash{$destVar}!~m/PIC_9/) || ($srcVar=~m/[a-zA-Z]+/ && $varHash{$destVar}!~m/PIC_X/) || ($srcVar=~m/ZEROES/ && $varHash{$destVar}!~m/PIC_9/)){
+           $ret = "ERR $srcVar:$varHash{$srcVar}  $destVar:$varHash{$destVar}";
+        }
+       
+
+      return $ret
+    }
+}
+
+#------------------------------------------------------------
+# Function verify_move_IR
+# Read COBOL input file and read srat of ir to end of ir and also get Variable with MOVE
+# statment and call validateVariables to compare
+# varable and its datatype.
+
+
+sub verify_move_IR(){
+
+    my $src ;
+    my $dest ;
+    my $lineSt = "";
+    my $lineNum;
+    my @arr;
+    my $irline;
+   my $cmd = "cat -n $inputfile | awk '/START OF IR $irNumber|START OF CR $irNumber/{ f = 1 } f; /END OF IR $irNumber|END OF CR $irNumber/{ f = 0 }'"; 
+  open(DATA, "$cmd |") or die "Couldn't open command , $!";
+  chomp(my @lines = <DATA>);
+  close(DATA);
+    for($i = 0; $i <= $#lines; $i = $i + 1) {
+
+        $lineNum = $lineNum + 1 ;
+
+        next if($lines[$i] =~ m/^......\*/);
+
+        $src = "";
+        $dest = "";
+        $lineSt = "";
+
+        #if($lines[$i] =~ m/MOVE/){
+
+        #if($lines[$i] =~ m/MOVE\s+(.*)\s+TO\s+(.*)/){
+        #if($lines[$i] =~ m/^.*\s*MOVE\s+(.*)\s+TO\s+(.*)/ || $lines[$i] =~ m/MOVE\s+(.*)\s+TO\s+(.*)/){
+        #if($lines[$i] =~ m/MOVE\s+([A-Za-z0-9\-]+)\s+TO\s+([A-Za-z0-9\-]+)/ || $lines[$i] =~ m/IF\s+([A-Za-z0-9\-]+)\s+[\=|\<|\>|\<\>|NOT \=|\<\=|\>\=]\s+(.*)/){
+        if($lines[$i] =~ m/MOVE\s+([A-Za-z0-9\-]+|\'.*\'|\".*\")\s+TO\s+([A-Za-z0-9\-]+)/){
+
+        # print "-----------$lines[$i]\n";
+                 $src = $1 ;
+                $dest = $2 ;
+                chomp($src);
+                chomp($dest);
+                $src =~ s/\(.*\)//g ;
+                $dest =~ s/\(.*\)//g ;
+
+                $dest =~ s/\.$//g ;
+
+                $src =~ s/^\s+|\s+$//g;
+                $dest =~ s/^\s+|\s+$//g;
+            
+               if ($lines[$i] =~ /^\s*(\d+)/) {
+                    $irline = $1;
+               }
+                if(defined($varHash{$src}) || defined($varHash{$dest})){
+                    if($varHash{$src} ne $varHash{$dest}){
+                        if($dest eq "" || $dest =~ m/^\s*$/){
+                            if($lines[$i+1] =~ m/^.*\s+(.*)/){
+                                 $dest = $1;
+                                chomp($dest);
+                                $dest =~ s/^\s+|\s+$//g;
+                                $dest =~ s/\(.*\)//g ;
+                                $dest =~ s/\.$//g ;
+
+                                $lineSt = validateVariables($src, $dest,$irline);
+                                $lineSt = $irline.":".$lineSt ;
+
+                                if($lineSt =~ m/\:OK /){
+                                    push(@errorLines, $lineSt) if $debug;
+                                }
+                                else{
+                                    push(@errorLines, $lineSt);
+                                }
+                                #print "$lineNum : $lineSt\n";
+                                next;
+                            }
+                        }
+                        else{
+                              $lineSt = validateVariables($src, $dest,$irline);
+                              $lineSt = $irline.":".$lineSt ;
+
+                              if($lineSt =~ m/\:OK /){
+                                  push(@errorLines, $lineSt) if $debug;
+                              }
+                              else{
+                                  push(@errorLines, $lineSt);
+                              }
+                        }
+                    }
+                    #elsif($varHash{$src} eq $varHash{$dest}){
+                    #    print "ALLOWED $src:$varHash{$src}    $dest:$varHash{$dest}\n";
+                    #}
+                }
+            }
+
+        #}
+
+    }
+}
+
+
+#------------------------------------------------------------
+# Function verify_move
+# Read COBOL input file and get Variable with MOVE
+# statment and call validateVariables to compare
+# varable and its datatype.
+
+
+sub verify_move(){
+
+    my $src ;
+    my $dest ;
+    my $lineSt = "";
+
+    open(DATA, '<', $inputfile) or die "Couldn't open $inputfile , $!";
+    chomp(my @lines = <DATA>);
+    close(DATA);
+    for($i = 0; $i <= $#lines; $i = $i + 1) {
+    
+        $lineNum = $lineNum + 1 ;
+        
+        next if($lines[$i] =~ m/^......\*/);
+        
+        $src = "";
+        $dest = "";
+        $lineSt = "";
+        
+        #if($lines[$i] =~ m/MOVE/){
+  
+        #if($lines[$i] =~ m/MOVE\s+(.*)\s+TO\s+(.*)/){
+        #if($lines[$i] =~ m/^.*\s*MOVE\s+(.*)\s+TO\s+(.*)/ || $lines[$i] =~ m/MOVE\s+(.*)\s+TO\s+(.*)/){
+        #if($lines[$i] =~ m/MOVE\s+([A-Za-z0-9\-]+)\s+TO\s+([A-Za-z0-9\-]+)/ || $lines[$i] =~ m/IF\s+([A-Za-z0-9\-]+)\s+[\=|\<|\>|\<\>|NOT \=|\<\=|\>\=]\s+(.*)/){
+        if($lines[$i] =~ m/MOVE\s+([A-Za-z0-9\-]+|\'.*\'|\".*\")\s+TO\s+([A-Za-z0-9\-]+)/){
+                
+	    # print "-----------$lines[$i]\n";
+  
+                $src = $1 ;
+                $dest = $2 ;
+    
+                chomp($src);
+                chomp($dest);
+    
+                $src =~ s/\(.*\)//g ;
+                $dest =~ s/\(.*\)//g ;
+    
+                $dest =~ s/\.$//g ;
+
+                $src =~ s/^\s+|\s+$//g;
+                $dest =~ s/^\s+|\s+$//g;
+
+		#    print "           $src $dest\n";
+                
+    
+                if(defined($varHash{$src}) || defined($varHash{$dest})){
+                    if($varHash{$src} ne $varHash{$dest}){
+                        if($dest eq "" || $dest =~ m/^\s*$/){
+
+                            if($lines[$i+1] =~ m/^.*\s+(.*)/){
+                                $dest = $1;
+                                chomp($dest);
+                                $dest =~ s/^\s+|\s+$//g;
+                                $dest =~ s/\(.*\)//g ;
+                                $dest =~ s/\.$//g ;
+                               
+                                $lineSt = validateVariables($src, $dest,$lineNum); 
+                                $lineSt = $lineNum.":".$lineSt ;
+
+                                if($lineSt =~ m/\:OK /){
+                                    push(@errorLines, $lineSt) if $debug;
+                                }
+                                else{
+                                    push(@errorLines, $lineSt);
+                                }
+                                #print "$lineNum : $lineSt\n";
+                                next;
+                            }
+                        }
+                        else{
+                              $lineSt = validateVariables($src, $dest,$lineNum); 
+                              $lineSt = $lineNum.":".$lineSt ;
+
+                              if($lineSt =~ m/\:OK /){
+                                  push(@errorLines, $lineSt) if $debug;
+                              }
+                              else{
+                                  push(@errorLines, $lineSt);
+                              }
+                        }
+                    }
+                    #elsif($varHash{$src} eq $varHash{$dest}){
+                    #    print "ALLOWED	$src:$varHash{$src}    $dest:$varHash{$dest}\n";
+                    #}
+                }
+            }
+    
+        #}
+    
+    }
+}
+
+main();
+
