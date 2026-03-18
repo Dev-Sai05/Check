@@ -1,0 +1,453 @@
+#!/usr/bin/perl
+
+use Env;
+use strict;
+use Data::Dumper;
+use Getopt::Long;
+
+
+=c
+#############################################################################################################################
+        how to run                                                  ifValidationTool.pl -f <input_file> -o <output_file> -ir <irno> [-h]
+
+        Description                                                 This Program checks the "IF" statements in the provided
+                                                                    input file and validate them on basis of provided 
+                                                                    conditions.
+                                                                    1] "AND" and "OR" keyword cannot come in same "IF" statement 
+                                                                        unless either of them is enclosed in brackets.
+                                                                    2] "NOT" and "OR" keyword cannot be present in same "IF"
+                                                                        statement.
+
+
+#############################################################################################################################
+=cut
+
+my $file;
+my $help;
+my $irno;
+my $output_file;
+my $debug;
+
+GetOptions(
+        'f=s' => \$file,
+        'h'   => \$help,
+        'o=s'   => \$output_file,
+        'ir=s'   => \$irno,
+        'd'   => \$debug
+) or die "Error in command line arguments\n";
+
+# Display help message if -h is provided
+if ($help) {
+    print "Usage: $0 -f <input_file> -o <output_file> -ir irno [-h]\n";
+    exit;
+}
+
+# Check if -f is provided
+unless (defined $file) {
+    die "Usage: $0 -f <filename> [-h]\n";
+}
+
+if(!-e $file || !-r $file){
+        print "$file not exists or readable\n";
+        exit;
+}
+
+if(defined $output_file){
+    if(!-e $output_file || !-r $output_file){
+        #print "$output_file not exists or readable\n";
+        #exit;
+    }      
+} 
+else{
+    $output_file=`pwd`;
+    $output_file=~ s/^\s+|\s+$//g;
+    $output_file.="/ifValidationOutput.txt"; 
+
+}
+
+
+
+#opening output file
+#open FH, ">$output_file";
+open(FH,'>',$output_file) or die "Can't open file $!";
+
+
+
+
+#reading the input file in a variable
+open(my $fs,'<',$file) or die "Can't open file $!";
+my $file_content = do { local $/; <$fs> };
+close $fs;
+
+$file_content=~s/^\w{5,6}\*.*//gm;
+$file_content=~s/^\w{5,6}//gm;
+$file_content=~s/END-IF/ENDF/gm;
+#print "\n$file_content\n";exit;
+
+
+my ($data_division_chunk)=$file_content=~m/DATA DIVISION(.*?)PROCEDURE DIVISION/s;
+my @cobol_variables;
+
+#Code to get all the variables and their datatypes and length
+#from the cobol/pco file.
+#
+foreach my $line (split(/\n/, $file_content)){
+   if ($line =~m/\s+PIC\s+/i && $line!~m/^\*/) {
+        if($line=~ m/\d{2}\s+(.*?)\s+PIC\s*(.*?)(?:VALUE|\.|\s)/gm){
+        my $var_details=$1;
+        my $var=$2;
+        my($length,$datatype);
+        if ( $var eq "X" || $var eq "9" || $var eq "S9")
+                {
+                $length=1;
+                $datatype=$var;
+                #print "$var -- Length : $length -- Datatype : $datatype\n";
+                }
+        elsif( $var=~m/^X+$/ || $var=~m/^9+$/)
+                {
+                $length=length($var);
+                $datatype=substr($var,1,1);
+                #print "$var -- Length : $length -- Datatype : $datatype\n";
+                }
+        elsif($var =~m/\(/)
+                {
+                ($length)=$var=~m/\((.*?)\)/;
+                ($datatype)=$var=~m/^(.*?)\(/;
+                #print "$var -- Length : $length -- Datatype : $datatype\n";
+                }
+        push @cobol_variables , "$var_details -1> $datatype -2> $length";
+
+        }
+    }
+    elsif($line =~m/\s+[8]{2}\s+/i && $line!~m/^\*/)
+    {
+        if($line=~ m/[8]{2}\s*(.*?)\s+VALUE\s*(.*?)(?:\.|\s)/gm){
+        my $var_details=$1;
+        my $var=$2; 
+        my($length,$datatype);
+        if ($var =~m/['|"]/){
+            $datatype="X";
+            $var=~s/['|"]//g;
+            $length=length($var);
+        }
+        elsif($var=~m/\d{1,}/){
+            $datatype="9";
+            $length=length($var);
+       }
+       push @cobol_variables , "$var_details -1> $datatype -2> $length";
+      }
+    }
+
+}
+
+#print Dumper \@cobol_variables; #prints the array containing all variables 
+
+
+
+#These are the keywords which are used to end the "IF" statement
+#
+my @keywords = qw(ADD ALTER CALL CANCEL CLOSE COMPUTE CONTINUE DELETE DISABLE DISPLAY DIVIDE ENABLE ENTER EVALUATE EXIT GOBACK GO IF INITIALIZE INSPECT MERGE MOVE MULTIPLY OPEN PERFORM PURGE READ RECEIVE RELEASE RETURN REWRITE SEARCH SEND SET SORT START STOP STRING SUBTRACT UNLOCK UNSTRING USE WRITE EXEC);
+
+my $keyword_regex = join('\s+|', @keywords);
+
+#my $pattern = qr/IF\s+(.*?)\s+(?=$keyword_regex)/s;
+#my (@if_blocks)=$file_content=~m/(\s|^)IF\s+(.*?)\s+(?=$keyword_regex)/gsx;
+#my (@if_blocks)=$file_content=~m/\s*\bIF\b\W+(.*?)\s+(?=$keyword_regex)/gsx;
+
+my @if_blocks;
+if ($irno){
+
+
+# Open input file to read
+open(my $fg, '<', $file) or die "Could not open file '$file' $!";
+# Initialize variables
+my $line_number = 0;
+my $in_change_block = 0;
+my $current_change_number = '';
+my $input_content="";
+chomp($irno);
+
+
+
+# Read the file line by line
+while (my $line = <$fg>) {
+    $line_number++;
+    next if ($line =~ /^\s*$/);
+    next if ($line =~ /^......\*/ && $line !~/[-*]\s*start\s*of|[-*]\s*end\s*of/i);
+
+    # Check for the start of a change block
+    if ($line =~ /START\s+OF\s+IR\s+$irno|START\s+OF\s+CR\s+$irno|START\s+OF\s+$irno/i) {
+        $current_change_number = $1;                                       # Capture the change number
+        $in_change_block = 1;                                              # We are now in a change block
+        next;                                                              # Skip to the next line
+    }
+
+    # Check for the end of a change block
+    if ($line =~ /END\s+OF\s+IR\s+$irno|END\s+OF\s+CR\s+$irno|END\s+OF\s+$irno/i) {
+        $in_change_block = 0;                                              # Exit the change block
+        next;                                                              # Skip to the next line
+    }
+
+    if($in_change_block == 1){
+    $input_content.="$line\n";
+    }
+
+}
+close $fg;
+
+$input_content=~s/^\w{5,6}\*.*//gm;
+$input_content=~s/^\w{5,6}//gm;
+$input_content=~s/END-IF/ENDF/gm;
+
+
+
+(@if_blocks)=$input_content=~m/\s*\bIF\b[(\s](.*?)\s+(?=ADD|ALTER|CALL|CANCEL|CLOSE|COMPUTE|CONTINUE|DELETE|DISABLE|DISPLAY|DIVIDE|ENABLE|ENTER|EVALUATE|EXIT|GOBACK|GO|IF|INITIALIZE|INSPECT|MERGE|MOVE|MULTIPLY|OPEN|PERFORM|PURGE|READ|RECEIVE|RELEASE|RETURN|REWRITE|SEARCH|SEND|SET|SORT|START|STOP|STRING|SUBTRACT|UNLOCK|UNSTRING|USE|WRITE|EXEC)/gsx;
+}
+else{
+(@if_blocks)=$file_content=~m/\s*\bIF\b[(\s](.*?)\s+(?=ADD|ALTER|CALL|CANCEL|CLOSE|COMPUTE|CONTINUE|DELETE|DISABLE|DISPLAY|DIVIDE|ENABLE|ENTER|EVALUATE|EXIT|GOBACK|GO|IF|INITIALIZE|INSPECT|MERGE|MOVE|MULTIPLY|OPEN|PERFORM|PURGE|READ|RECEIVE|RELEASE|RETURN|REWRITE|SEARCH|SEND|SET|SORT|START|STOP|STRING|SUBTRACT|UNLOCK|UNSTRING|USE|WRITE|EXEC)/gsx;
+}
+
+#print Dumper \@if_blocks;
+
+
+#This function will validate if "AND" and "OR" keyword present
+#in same sentence without either of them enclosed in parantheses
+#
+sub validate_sentence {
+    my ($sentence) = @_;
+    
+    # Check if both AND and OR exist in the sentence
+    if ($sentence =~ /\b(AND)\b/i && $sentence =~/\b(OR)\b/i) {
+        # Check if either AND or OR is in parentheses
+        if ($sentence !~ /\([^)]*\b(AND|OR)\b[^(]*\)/is) {
+            die "Error: When both 'AND' and 'OR' are present, one must be enclosed in parentheses\n";
+        }
+    }
+    
+    return $sentence;
+}
+
+#This function will validate if "NOT" and "OR" keyword are present
+#in the same sentence
+#
+sub validate_sentence1 {
+    my ($sentence) = @_;
+    
+    # Check if both AND and OR exist in the sentence
+    if ($sentence =~ /\b(NOT =|IS NOT EQUAL TO|IS NOT =|NOT EQUALS|NOT EQUAL|NOT)\b/i && $sentence =~/\b(NOT =|OR)\b/i) {
+        # Check if either AND or OR is in parentheses
+        #if ($sentence !~ /\([^)]*\b(AND|OR)\b[^(]*\)/i) {
+            die "Error: Both 'NOT' and 'OR' are present\n";
+        #}
+    }
+    
+    return $sentence;
+}
+
+
+print FH "\n########################## IF BLOCK ##########################\n";
+
+#This code block iterates over the array containing "IF BLOCKS" and 
+#checks for the condtions on each of them and give output.
+#
+foreach my $test (@if_blocks) {
+    print FH "Testing: $test\n\n";
+
+    eval {
+        validate_sentence($test);
+        #print "Valid\n\n";
+    } or do {
+        print FH "$@\n";
+    };
+    
+    eval {
+        validate_sentence1($test);
+        #print "Valid\n\n";
+    } or do {
+        print FH "$@\n";
+    };
+
+    my (@variables)=split(/ AND| OR/,$test);
+    #print FH Dumper \@variables;
+    my @variables_in_ifstmt;
+    
+
+    for my $variables_data (@variables){
+        $variables_data=~s/^\s*NOT\s*\(//g;
+        if ($variables_data =~m/^\s*(.*?)\s*(?:IS GREATER THAN|IS NOT EQUAL TO|IS LESS THAN|IS EQUAL TO|GREATER THAN|LESS THAN|IS NOT =|EQUAL TO|EQUALS|NOT EQUALS|NOT EQUAL|NOT =|EQUAL|NOT|<>|>=|<=|>|<|=)\s*(.*?)(?:$|\s+)/s ) {
+              my $variable = $1;
+              my $value = $2;
+              
+              push @variables_in_ifstmt,"$variable -> $value";
+        }
+    }
+    #print FH Dumper \@variables_in_ifstmt;
+    for my $temp_var (@variables_in_ifstmt){
+
+        my $var1_dtype;
+        my $var2_dtype;
+        my $var1_length;
+        my $var2_length;
+        my ($variable1)=$temp_var =~m/^\s*(.*?)->/;
+        my ($variable2)=$temp_var =~m/->(.*?)\s*$/;
+        $variable1 =~ s/^\s+|\s+$//g;
+        $variable1 =~ s/\(//g;
+        $variable1 =~ s/\)//g;
+        $variable2 =~ s/^\s+|\s+$//g;
+        $variable2 =~ s/\(//g;
+        $variable2 =~ s/\)//g;
+        
+
+        #checks if first variable is either "space"
+        #or in either single or double quotes
+        #according to that datatype is set
+        # 
+        if ($variable1 =~m/^\s*space/i || $variable1 =~m/^\s*['|"].*?["|']\s*$/i){
+            $var1_dtype="X";       
+             if($variable1 =~m/^space/i){
+               $var1_length=1;
+            }
+            else{
+               my $temp1=$variable1;
+               $temp1=~s/['|"]//g;
+               $var1_length=length($temp1);
+
+               $var1_length=length($variable1);
+            }
+
+            #print "\nMATCHED1-1\n";
+        }
+        #checks if first variable is either "zero"
+        #or a number according to that length and datatype is set
+        #
+        elsif ($variable1 =~m/^\s*zero/i || $variable1 =~m/^\s*\d+\s*$/i){
+            $var1_dtype="9";
+             if($variable1 =~m/^zero/i){
+               $var1_length=1;
+            }
+            else{
+               $var1_length=length($variable1);
+            }
+
+            #print "\nMATCHED1-2\n";
+        }
+        #checks if first variable is normal variable
+        #and then gets datatpe and length of that variable.
+        #
+        else{
+            #print "VAR:$variable1\n";
+            my $hold_var1_length;
+            if ($variable1 =~m/\(\d+:\d+\)/){
+               ($hold_var1_length)=$variable1=~m/.*?\(.*?:(.*?)\)/;
+               ($variable1)=~s/\(.*?:.*?\)//;
+            } 
+            my @matches1 = grep { /^\s*$variable1\s*-1>/ } @cobol_variables;
+            my $size1=@matches1;
+            #print "Size is $size1";
+            
+            ($var1_dtype)=$matches1[0]=~m/-1>\s*(.*?)\s*-2>/;
+            ($var1_length)=$matches1[0]=~m/-2>\s*(.*?)\s*$/;
+             if (defined $hold_var1_length){
+                $var1_length=$hold_var1_length;
+             } 
+            #print "\nMATCHED1-3\n";
+
+        }
+
+
+
+        #checks if second variable is either "space"
+        #or in either single or double quotes
+        #according to that datatype is set
+        #
+        if ($variable2 =~m/^\s*space/i || $variable2 =~m/^\s*['|"].*?["|']\s*$/i){
+            $var2_dtype="X";
+            
+            if($variable2 =~m/^space/i){
+               $var2_length=1;
+            }
+            else{
+               my $temp2=$variable2;
+               $temp2=~s/['|"]//g;
+               $var2_length=length($temp2);
+            }
+            #print "\nMATCHED2-1\n";
+        }
+        #checks if second variable is either "zero"
+        #or a number according to that length and datatype is set
+        #
+        elsif ($variable2 =~m/^\s*zero/i || $variable2 =~m/^\s*\d+\s*$/i){
+            $var2_dtype="9";
+            if($variable2 =~m/^zero/i){
+               $var2_length=1;
+            }
+            else{
+               $var2_length=length($variable2);
+            }
+
+            #print "\nMATCHED2-2\n";
+        }
+        #checks if second variable is normal variable
+        #and then gets datatpe and length of that variable.
+        #
+        else{
+            #print "VAR:$variable2\n";
+            my $hold_var2_length;
+            if ($variable2 =~m/\(\d+:\d+\)/){
+               ($hold_var2_length)=$variable2=~m/.*?\(.*?:(.*?)\)/;
+               ($variable2)=~s/\(.*?:.*?\)//;
+            } 
+            my @matches2 = grep { /^\s*$variable2\s*-1>/ } @cobol_variables;
+            my $size2=@matches2;
+            #print "Size is $size2";
+            ($var2_dtype)=$matches2[0]=~m/-1>\s*(.*?)\s*-2>/;
+            ($var2_length)=$matches2[0]=~m/-2>\s*(.*?)\s*$/;
+            if (defined $hold_var2_length){
+                $var1_length=$hold_var2_length;
+            } 
+            #print "\nMATCHED2-3\n";
+        }
+        #print "VARIABLE1 : $variable1\nDTYPE : $var1_dtype\nLENGTH : $var1_length\n";
+        #print "VARIABLE2 : $variable2\nDTYPE : $var2_dtype\nLENGTH : $var2_length\n";
+
+
+#This loop checks if datatype and length of both variables matches or not
+#and return a output accordingly
+#
+if ($var1_dtype ne "" && $var2_dtype ne "" && $var1_length ne "" && $var2_length ne ""){
+
+        my $dflag=0;
+        my $lflag=0;
+        $var1_length=~s/^0//;
+        $var2_length=~s/^0//;
+        
+        if ($var1_dtype ne $var2_dtype){
+          $dflag=1;         
+        }
+        if ($var1_length ne $var2_length){
+          $lflag=1;
+        }
+        if ($dflag eq 1 && $lflag eq 1){
+          print FH "BOTH DATATYPE AND LENGTH MISS MATCHED {[$variable1][$var1_dtype][$var1_length]} {[$variable2][$var2_dtype][$var2_length]}\n";
+        }
+        elsif($dflag eq 0 && $lflag eq 0){
+          #print FH "BOTH DATATYPE AND LENGTH  MATCHED {[$variable1][$var1_dtype][$var1_length]} {[$variable2][$var2_dtype][$var2_length]}\n";
+        }
+        elsif($dflag eq 0 && $lflag eq 1){
+          print FH "DATATYPE MATCHED AND LENGTH MIS MATCHED {[$variable1][$var1_dtype][$var1_length]} {[$variable2][$var2_dtype][$var2_length]}\n";
+        }
+        elsif($dflag eq 1 && $lflag eq 0){
+          print FH "DATATYPE MIS MATCHED AND LENGTH  MATCHED {[$variable1][$var1_dtype][$var1_length]} {[$variable2][$var2_dtype][$var2_length]}\n";
+        }
+
+
+}
+else{
+     print FH "MANUALLY VERIFY VARIABLES {[$variable1][$var1_dtype][$var1_length]} {[$variable2][$var2_dtype][$var2_length]}.\n";
+}
+print FH "\n";
+}
+print FH "########################## IF BLOCK ##########################\n\n";
+}
+print "Output_file = $output_file\n";
+close FH;  #output file filehandle closed.
