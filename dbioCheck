@@ -1,0 +1,163 @@
+#!/usr/bin/perl
+#
+# Name :
+#      dbioCheck.pl
+#
+# Description:
+#      This program analyses COBOL source code passed as argument.
+#      It will throw alert if DBIO or DBIOMOD is used in code.
+#
+#
+# How to run:
+#      See below - value of @MM
+#      dbioCheck.pl -if <Input file path> -d -of <Output file path optional>
+#      or
+#      dbioCheck.pl -if /fns/d/r/src/BR0000.COB -d -irno ALL
+#      or
+#      dbioCheck.pl -if /fns/d/r/src/BR0000.COB -d -of /home/fnsonld/out.txt
+#
+
+
+use Data::Dumper ;
+use Getopt::EvaP ;
+use Env;
+use File::Basename;
+
+my $inputfile ;
+my $outputfile ;
+my $debug ;
+my $irNumber = "";
+
+@PDT = split /\n/, <<end_of_PDT ;
+PDT
+
+inputfile, if:    string  = \$required
+outputfile, of:   string
+irnumber, irno:   string
+debug, d:         switch
+
+PDTEND no_file_list
+end_of_PDT
+
+@MM = split /\n/, <<end_of_MM;
+.inputfile
+          input cobol file
+.outputfile
+          output file to print the results,if not provided the output file will be created at the path where program is running.
+end_of_MM
+
+
+# Main function,To call all the functions
+#
+sub main(){
+    initialize();
+    if ($irNumber eq ""){
+        process();
+    }else{
+        processIR();
+    }
+}
+
+
+
+# Function for initializing all variables and command
+# line arguments
+#
+sub initialize(){
+
+    &EvaP( \@PDT, \@MM, \%cmdarg );
+    $inputfile  = $cmdarg{'inputfile'} ;
+    $outputfile  = $cmdarg{'outputfile'} ;
+    $irNumber  = $cmdarg{'irnumber'} ;
+    $debug  = $cmdarg{'debug'} ;
+
+    # Check if input file exist and is readable
+    if(!-e $inputfile || !-r $inputfile){
+        print "$inputfile not exists or readable\n";
+        exit;
+    }
+
+    # If no output file passed in args then take default
+    if($outputfile eq ""){
+        my $inpFileName = basename($inputfile);
+        my $path=`pwd`;
+        chomp($path);
+        $outputfile = "$path/$inpFileName\_out.txt";
+    }
+    print "\nInput File : $inputfile\nOutput File : $outputfile\n";
+    open(OUTPUT, '>', "$outputfile") or die $!;
+}
+
+
+# Process function reads input file line by line and check
+# for the given conditions ,if met then print them in output
+# file with line number
+#
+sub process(){
+    # Open input file to read
+    open(my $fh, '<', $inputfile) or die "Could not open file '$inputfile' $!";
+
+    # Read the file line by line
+    while (my $line = <$fh>) {
+        $line_number++;
+        next if ($line =~ /^......\*/ || $line =~ /^\s*$/);
+
+        if ($line=~m/CALL\s*DBIOMODNAME\s*USING/){
+                print OUTPUT  "$line_number     DBIOMODNAME call is used verify manually that only DBIOMOD-STAT to be used in validations\n";
+            }elsif($line=~m/CALL\s*\"DBIO\"\s*USING/){
+                print OUTPUT "$line_number     \"DBIO\" call is used verify manually that only DBIO-CALL-STATUS to be used in validations\n";
+            }
+}
+}
+
+
+# Process function reads input file line by line and check
+# for the given conditions ,if met then print them in output
+# file with line number
+#
+sub processIR(){
+    # Open input file to read
+    open(my $fh, '<', $inputfile) or die "Could not open file '$inputfile' $!";
+    # Initialize variables
+    my $line_number = 0;
+    my $in_change_block = 0;
+    my $current_change_number = '';
+    
+    # Read the file line by line
+    while (my $line = <$fh>) {
+        $line_number++;
+        next if ($line =~ /^......\*/ || $line =~ /^\s*$/);
+    	
+    	
+        # Check for the start of a change block
+        if ($line =~ /START\s+OF\s+IR\s+(\d+)|START\s+OF\s+CR\s+(\d+)/) {
+            $current_change_number = $1;                                       # Capture the change number
+            $in_change_block = 1;                                              # We are now in a change block
+            next;                                                              # Skip to the next line
+        }
+        
+
+        # Check for the end of a change block
+        if ($line =~ /END\s+OF\s+IR\s+(\d+)|END\s+OF\s+CR\s+(\d+)/) {
+            $in_change_block = 0;                                              # Exit the change block
+            next;                                                              # Skip to the next line
+        }
+        
+        next if($in_change_block == 0);     
+
+        # Checking the DBIO or DBIOMOD condition
+        if ($in_change_block && $current_change_number eq $irNumber) {
+            if ($line=~m/CALL\s*DBIOMODNAME\s*USING/){
+                print OUTPUT  "$line_number     DBIOMODNAME call is used verify manually that only DBIOMOD-STAT to be used in validations\n";
+            }elsif($line=~m/CALL\s*\"DBIO\"\s*USING/){
+                print OUTPUT "$line_number     \"DBIO\" call is used verify manually that only DBIO-CALL-STATUS to be used in validations\n";
+            }
+        }
+}
+}
+
+
+main(); #calling the main function
+
+close($fh); # Close input file handle
+close(OUTPUT); # Close output file handle
