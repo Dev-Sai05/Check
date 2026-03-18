@@ -1,0 +1,353 @@
+#!/usr/bin/perl
+#
+# Name :
+#      unusedVarCheck.pl
+#
+# Description:
+#      This program analyses COBOL source code passed as argument.and takes all 
+#      initialized variables from the file between "working storage" section to 
+#      "Procedure division" section.Then checks for all the initialized variables
+#      if it is present below "Procedure division" section.If not present then it
+#      prints those variables in output file. 
+#
+# How to run:
+#      See below - value of @MM
+#      unusedVarCheck.pl -if <Input file path> -of <Output file path optional>
+#      or
+#      unusedVarCheck.pl -if /fns/d/r/src/BR0000.COB
+#      or
+#      unusedVarCheck.pl -if /fns/d/r/src/BR0000.COB -of /home/fnsonld/out.txt
+#      or
+#      unusedVarCheck.pl -if /fns/d/r/src/BR0000.COB -of /home/fnsonld/out.txt -ir 19080036
+#
+#
+
+
+use Data::Dumper ;
+use Getopt::EvaP ;
+use Env;
+use File::Basename;
+
+my $inputfile ;
+my $outputfile ;
+my %cobol_vars;
+my $irno ;
+
+@PDT = split /\n/, <<end_of_PDT ;
+PDT
+
+inputfile, if:    string  = \$required
+outputfile, of:   string
+irno, ir:   string
+
+PDTEND no_file_list
+end_of_PDT
+
+@MM = split /\n/, <<end_of_MM;
+.inputfile
+input cobol file
+.outputfile
+output file to print the results,if not provided the output file will be created at the path where program is running.
+.irno
+IR no/CR no
+end_of_MM
+
+
+# Main function,To call all the functions
+#
+sub main(){
+	initialize();
+        if (!$irno){
+	    process();
+	    check_unused_vars();
+        }
+        else{
+            process_ir();
+            check_unused_vars_for_ir();
+        }
+        write_op();
+}
+
+
+
+# Function for initializing all variables and command
+# line arguments
+#
+sub initialize(){
+    &EvaP( \@PDT, \@MM, \%cmdarg );
+    $inputfile  = $cmdarg{'inputfile'} ;
+    $outputfile  = $cmdarg{'outputfile'} ;
+    $irno  = $cmdarg{'irno'} ;
+
+    # Check if input file exist and is readable
+    if(!-e $inputfile || !-r $inputfile){
+    print "$inputfile not exists or readable\n";
+    exit;
+    }
+
+    # If no output file passed in args then take default
+    if($outputfile eq ""){
+    my $inpFileName = basename($inputfile);
+    my $path=`pwd`;
+    chomp($path);
+    $outputfile = "$path/$inpFileName\_out.txt";
+    }
+    print "\nInput File : $inputfile";
+    open(OUTPUT, '>', "$outputfile") or die $!;
+}
+
+
+# for the given conditions ,if met then print them in output
+# file with line number
+#
+sub process(){
+    # Open input file to read
+    open(my $fh, '<', $inputfile) or die "Could not open file '$inputfile' $!";
+
+    # Initialize variables
+    my $line_number = 0;
+    my $in_variable_block = 0;
+    my $current_change_number = '';
+
+    # Read the file line by line
+    while (my $line = <$fh>) {
+      $line_number++;
+      next if ($line =~ /^......\*/ || $line =~ /^\s*$/);
+
+      # Check for the start of a change block
+      if ($line =~ /WORKING-STORAGE SECTION/) {
+        $in_variable_block = 1;                                              # We are now in a change block
+        next;                                                              # Skip to the next line
+      }
+
+
+      # Check for the end of a change block
+      if ($line =~ /PROCEDURE DIVISION/) {
+        $in_variable_block = 0;                                              # Exit the change block
+        next;                                                              # Skip to the next line
+      }
+
+    if ($in_variable_block) {
+      if ($line =~m/\s+PIC\s+/i && $line!~m/^\*/) {
+        if($line=~ m/\d{2}\s+(.*?)\s+PIC\s*(.*?)(?:VALUE|\.|\s)/gm){
+          my $var_details=$1;
+          my $var=$2;
+          my($length,$datatype);
+          if ( $var eq "X" || $var eq "9" || $var eq "S9"){
+            $length=1;
+            $datatype=$var;
+            #print "$var -- Length : $length -- Datatype : $datatype\n";
+          }
+          elsif( $var=~m/^X+$/ || $var=~m/^9+$/){
+            $length=length($var);
+            $datatype=substr($var,1,1);
+            #print "$var -- Length : $length -- Datatype : $datatype\n";
+          }
+          elsif($var =~m/\(/){
+            ($length)=$var=~m/\((.*?)\)/;
+            ($datatype)=$var=~m/^(.*?)\(/;
+            #print "$var -- Length : $length -- Datatype : $datatype\n";
+          }
+        $var_details=~s/^\s*\d{1,}\s*//g;
+        $cobol_vars{$var_details}=0;
+        }
+      }
+    }
+}
+close($fh);
+}
+
+
+
+
+
+
+
+sub process_ir(){
+    # Open input file to read
+    open(my $fh, '<', $inputfile) or die "Could not open file '$inputfile' $!";
+
+    # Initialize variables
+    my $line_number = 0;
+    my $in_variable_block = 0;
+    my $in_ir_block = 0;
+
+
+    # Read the file line by line
+    while (my $line = <$fh>) {
+      $line_number++;
+      next if ($line =~ /^\s*$/);
+      next if ($line =~ /^......\*/ && $line !~/[-*]\s*start\s*of|[-*]\s*end\s*of/i);
+
+      # Check for the start of a change block
+      if ($line =~ /WORKING-STORAGE SECTION/) {
+        $in_variable_block = 1;                                              # We are now in a change block
+        next;                                                              # Skip to the next line
+      }
+
+      	  # Check for the start of a change block
+    if ($line =~ /START\s+OF\s+IR\s+$irno|START\s+OF\s+CR\s+$irno|START\s+OF\s+$irno/i) {
+        $in_ir_block = 1;                                              # We are now in a change block
+        next;                                                              # Skip to the next line
+    }
+
+
+    # Check for the end of a change block
+    if ($line =~ /END\s+OF\s+IR\s+$irno|END\s+OF\s+CR\s+$irno|END\s+OF\s+$irno/i) {
+        $in_ir_block = 0;                                              # Exit the change block
+        next;                                                              # Skip to the next line
+    }
+
+      # Check for the end of a change block
+      if ($line =~ /PROCEDURE DIVISION/) {
+        $in_variable_block = 0;                                              # Exit the change block
+        next;                                                              # Skip to the next line
+      }
+
+	
+
+    if ($in_variable_block && $in_ir_block) {
+      if ($line =~m/\s+PIC\s+/i && $line!~m/^\*/) {
+        if($line=~ m/\d{2}\s+(.*?)\s+PIC\s*(.*?)(?:VALUE|\.|\s)/gm){
+          my $var_details=$1;
+          my $var=$2;
+          my($length,$datatype);
+          if ( $var eq "X" || $var eq "9" || $var eq "S9"){
+            $length=1;
+            $datatype=$var;
+            #print "$var -- Length : $length -- Datatype : $datatype\n";
+          }
+          elsif( $var=~m/^X+$/ || $var=~m/^9+$/){
+            $length=length($var);
+            $datatype=substr($var,1,1);
+            #print "$var -- Length : $length -- Datatype : $datatype\n";
+          }
+          elsif($var =~m/\(/){
+            ($length)=$var=~m/\((.*?)\)/;
+            ($datatype)=$var=~m/^(.*?)\(/;
+            #print "$var -- Length : $length -- Datatype : $datatype\n";
+          }
+        $var_details=~s/^\s*\d{1,}\s*//g;
+        $cobol_vars{$var_details}=0;
+        }
+      }
+    }
+
+}
+close($fh);
+
+}
+
+
+
+sub check_unused_vars(){
+    # Open input file to read
+    open(my $fh, '<', $inputfile) or die "Could not open file '$inputfile' $!";
+    # Initialize variables
+    my $line_number = 0;
+    my $in_code_block = 0;
+
+    while (my $line = <$fh>) {
+      $line_number++;
+      next if ($line =~ /^......\*/ || $line =~ /^\s*$/); 
+      if ($line =~ /PROCEDURE DIVISION/) {
+#print "IN PROCEDURE\n";
+        $in_code_block = 1;                                              # Exit the change block
+        next;                                                              # Skip to the next line
+      } 
+#print "$in_code_block\n";
+      next if($in_code_block eq "0"); 
+      for my $var (keys %cobol_vars){
+        $var=~s/\s*-1>.*//g;
+        $var=~s/^\s*\d{1,}\s*//g;
+        if ($line=~m/\b$var\b/){
+          $cobol_vars{$var}=$line_number;
+        }
+      }
+    }
+close($fh); # Close input file handle
+}
+
+
+
+
+
+
+
+sub check_unused_vars_for_ir(){
+    # Open input file to read
+    open(my $fh, '<', $inputfile) or die "Could not open file '$inputfile' $!";
+    # Initialize variables
+    my $line_number = 0;
+    my $in_code_block = 0;
+    my $in_ir_block = 0;
+
+    while (my $line = <$fh>) {
+      $line_number++;
+      next if ($line =~ /^\s*$/);
+	  
+      if ($line =~ /PROCEDURE DIVISION/) {
+        $in_code_block = 1;                                              # Exit the change block
+        next;                                                              # Skip to the next line
+      }
+	  next if ($line =~ /^......\*/ && $line !~/[-*]\s*start\s*of|[-*]\s*end\s*of/i);
+      next if($in_code_block eq "0");
+	  
+	  
+	  # Check for the start of a change block
+    if ($line =~ /START\s+OF\s+IR\s+$irno|START\s+OF\s+CR\s+$irno|START\s+OF\s+$irno/i) {
+        $current_change_number = $1;                                       # Capture the change number
+        $in_ir_block = 1;                                              # We are now in a change block
+        next;                                                              # Skip to the next line
+    }
+	
+    # Check for the end of a change block
+    if ($line =~ /END\s+OF\s+IR\s+$irno|END\s+OF\s+CR\s+$irno|END\s+OF\s+$irno/i) {
+        $in_ir_block = 0;                                              # Exit the change block
+        next;                                                              # Skip to the next line
+    }
+
+
+	
+    if($in_ir_block == 1){
+        for my $var (keys %cobol_vars){
+        $var=~s/\s*-1>.*//g;
+        $var=~s/^\s*\d{1,}\s*//g;
+        if ($line=~m/\b$var\b/){
+          $cobol_vars{$var}=$line_number;
+        }
+      }
+    }
+    }
+close($fh); # Close input file handle
+}
+
+
+
+
+
+
+
+
+
+sub write_op(){
+
+print OUTPUT "\n---------- UN-USED VARIABLES ----------\n";
+for my $key (keys %cobol_vars){
+    my $value =$cobol_vars{$key};
+    if ($value eq 0){
+       print OUTPUT "'$key' variable is unused\n";
+}
+}
+#print OUTPUT "\n\n---------- USED VARIABLES ----------\n";
+#for my $key (keys %cobol_vars){
+#    my $value =$cobol_vars{$key};
+#    if ($value ne 0){
+#       print OUTPUT "'$key' variable is found on '$value'\n";
+#}
+#} 
+close(OUTPUT); # Close output file handle
+print "\nOUTPUT_FILE: $outputfile\n";
+}
+
+main(); #calling the main function
