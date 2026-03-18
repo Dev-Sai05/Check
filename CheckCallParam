@@ -1,0 +1,520 @@
+#!/usr/bin/perl
+#
+# How to run:
+#      See below - value of @MM
+#      CheckCallParam.pl -if <Input file path> -d -of <Output file path>
+#
+#      CheckCallParam.pl -if /fns/d/r/src/BR0000.COB -d
+#      or
+#      CheckCallParam.pl -if /fns/d/r/src/BR0000.COB -d -of /home/fnsonld/out.txt
+#
+#
+use Data::Dumper ;
+use Getopt::EvaP ;
+use Env;
+use File::Basename;
+
+my $inputfile ;
+my $outputfile ;
+my $debug ;
+my %varHash = ();
+my %subcallHash = () ;
+my %subCOBData = () ;
+my @errorLines = () ;
+my $lineNum = 0;
+
+#my $mflistdir = "$mflist";
+my $mflistdir = "/fns/d0/r/mflist";
+#my $pcodir = "/fns/$REGION/r/dbora/pco";
+my $pcodir = "/fns/d0/r/dbora/pco";
+#my $pcodir = "/home/fnsonld7/bilal";
+my $tmpUnCompressDir = "/tmp/$LOGNAME/TMPUNCOMP";
+
+@PDT = split /\n/, <<end_of_PDT ;
+PDT
+
+inputfile, if:    string  = \$required
+outputfile, of:   string
+debug, d:         switch 
+
+PDTEND no_file_list
+end_of_PDT
+
+@MM = split /\n/, <<end_of_MM;
+.inputfile
+          input cobol file
+
+.outputfile
+          output file contain error and ok statments.
+
+.debug
+          debug for print all conditions error and ok.
+
+end_of_MM
+
+my @cobolKeywords = qw(
+       ACCEPT ACCESS ADD ADDRESS ADVANCING AFTER ALPHABET ALPHABETIC
+       ALPHABETIC-LOWER ALPHABETIC-UPPER ALPHANUMERIC ALPHANUMERIC-EDITED ALS
+       ALTERNATE AND ANY ARE AREA AREAS ASCENDING ASSIGN AT AUTHOR BEFORE BINARY
+       BLANK BLOCK BOTTOM BY CANCEL CBLL CD CF CH CHARACTER CHARACTERS CLASS
+       CLOCK-UNITS CLOSE COBOL CODE CODE-SET COLLATING COLUMN COMMA COMMON
+       COMMUNICATIONS COMPUTATIONAL COMPUTE CONTENT CONTINUE
+       CONTROL CONVERTING CORR CORRESPONDING COUNT CURRENCY DATE DATE-COMPILED
+       DATE-WRITTEN DAY DAY-OF-WEEK DE DEBUG-CONTENTS DEBUG-ITEM DEBUG-LINE
+       DEBUG-NAME DEBUG-SUB-1 DEBUG-SUB-2 DEBUG-SUB-3 DEBUGGING DECIMAL-POINT
+       DELARATIVES DELETE DELIMITED DELIMITER DEPENDING DESCENDING DESTINATION
+       DETAIL DISABLE DISPLAY DIVIDE DIVISION DOWN DUPLICATES DYNAMIC EGI ELSE EMI
+       ENABLE END-ADD END-COMPUTE END-DELETE END-DIVIDE END-EVALUATE END-IF
+       END-MULTIPLY END-OF-PAGE END-READ END-RECEIVE END-RETURN
+       END-REWRITE END-SEARCH END-START END-STRING END-SUBTRACT END-UNSTRING
+       END-WRITE EQUAL ERROR ESI EVALUATE EVERY EXCEPTION EXIT
+       EXTEND EXTERNAL FALSE FD FILLER FINAL FIRST FOOTING FOR FROM
+       GENERATE GIVING GLOBAL GO GREATER GROUP HEADING HIGH-VALUE HIGH-VALUES I-O
+       IN INDEX INDEXED INDICATE INITIAL INITIALIZE
+       INITIATE INPUT INSPECT INSTALLATION INTO IS JUST
+       JUSTIFIED KEY LABEL LAST LEADING LEFT LENGTH LOCK MEMORY
+       MERGE MESSAGE MODE MODULES MOVE MULTIPLE MULTIPLY NATIVE NEGATIVE NEXT NO NOT
+       NUMBER NUMERIC NUMERIC-EDITED OCCURS OFF OMITTED ON OPEN
+       OPTIONAL OR ORDER ORGANIZATION OTHER OUTPUT OVERFLOW PACKED-DECIMAL PADDING
+       PAGE PAGE-COUNTER PERFORM PF PH PIC PICTURE PLUS POINTER POSITION POSITIVE
+       PRINTING PROCEDURES PROCEDD PROGRAM PURGE QUEUE QUOTES
+       RANDOM RD READ RECEIVE RECORD RECORDS REDEFINES REEL REFERENCE REFERENCES
+       RELATIVE RELEASE REMAINDER REMOVAL REPLACE REPLACING REPORT REPORTING
+       REPORTS RERUN RESERVE RESET RETURN RETURNING REVERSED REWIND REWRITE RF RH
+       RIGHT ROUNDED RUN SAME SD SEARCH SECTION SECURITY SEGMENT SEGMENT-LIMITED
+       SELECT SEND SENTENCE SEPARATE SEQUENCE SEQUENTIAL SET SIGN SIZE SORT
+       SORT-MERGE SOURCE STANDARD
+       STANDARD-1 STANDARD-2 START STATUS STOP STRING SUB-QUEUE-1 SUB-QUEUE-2
+       SUB-QUEUE-3 SUBTRACT SUM SUPPRESS SYMBOLIC SYNC SYNCHRONIZED TABLE TALLYING
+       TAPE TERMINAL TERMINATE TEST TEXT THAN THEN THROUGH THRU TIME TIMES TO TOP
+       TRAILING TRUE TYPE UNIT UNSTRING UNTIL UP UPON USAGE USE USING VALUE VALUES
+       VARYING WHEN WITH WORDS WRITE
+       CONTAINS
+       IF INVALID END EOP
+       ALL CALL
+       GOBACK PARA
+       MAIN-LINE MAINLINE BEGIN
+       ) ;
+
+sub main(){
+
+    init();
+    %varHash = generateHash_variables($inputfile);
+    process();
+    #print Dumper %subcallHash if($debug); 
+}
+
+
+sub init(){
+
+    &EvaP( \@PDT, \@MM, \%cmdarg );
+    $inputfile  = $cmdarg{'inputfile'} ;
+    $outputfile  = $cmdarg{'outputfile'} ;
+    $debug  = $cmdarg{'debug'} ;
+
+    if(!-e $inputfile || !-r $inputfile){
+        print "$inputfile not exists or readable\n";
+        exit;
+    }
+
+    if($outputfile eq ""){
+        my $inpFileName = basename($inputfile);
+        $outputfile = "/tmp/$LOGNAME/$inpFileName\_Init.err";
+    }
+}
+
+
+sub generateHash_variables($){
+
+    my $var = "";
+    my $datatype = "";
+
+    my $inFile = $_[0] ; 
+    my $COBNAME = $inFile ; 
+ 
+    $COBNAME =~ s/\.COB|\.PCO//i;
+
+#print "\n*-*-*-*-*-$COBNAME-*-*-*-*\n";
+
+
+    my %tmpHash = () ;
+   
+       
+    open(DATA, '<', $inFile) or die "Couldn't open $inputfile , $!";
+    while(<DATA>) {
+       ($var, $datatype) = "";
+       next if($_ =~ m/^......\*/);
+        
+         
+       #if($_ =~ m/^.*\s+\d{2}\s+(.*)\s+(PIC\s+.).*\./){
+       if($_ =~ m/^.*\s+\d{2}\s+(.*)\s+(PIC\s+.)(\(.*?\))[\.|\s+]/){
+           my $key = $1 ;
+           my $value = $2 ;
+	   my $lenght = $3 ;
+	#print "\n$key----$value-------$lenght\n";exit;
+           $key=~ s/^\s+|\s+$//g;
+           $value=~ s/^\s+|\s+$//g;
+	
+           $value=~ s/\s+/ /g;
+	   $lenght =~s/\((.*?)\)/$1/g;
+           chomp($key);
+           chomp($value);
+           chomp($lenght);
+
+           $tmpHash{$key}->{'VAL'} = $value ;
+           $tmpHash{$key}->{'LEN'} = $lenght ;
+       }
+    }
+    close(DATA);
+    #print Dumper \%tmpHash;
+    return %tmpHash ;
+}
+
+sub generateHash_variablesSUBCOB($){
+
+    my $var = "";
+    my $datatype = "";
+
+    my $inFile = $_[0] ; 
+ 
+    my $cobFile = basename($inFile);
+    $cobFile =~ s/\.COB|\.PCO//i;
+
+    open(SUBCOBDATA, '<', $inFile) or die "Couldn't open $inputfile , $!";
+
+    while(<SUBCOBDATA>) {
+       ($var, $datatype) = "";
+       next if($_ =~ m/^......\*/);
+
+       if($_ =~ m/^.*\s+\d{2}\s+(.*)\s+(PIC\s+.)(\(.*?\))[\.|\s+]/){
+           
+           my $key = $1 ;
+           my $value = $2 ;
+	   my $lenght = $3 ;
+	#print "\n$key----$value\n";exit;
+           $key=~ s/^\s+|\s+$//g;
+           $value=~ s/^\s+|\s+$//g;
+
+           $value=~ s/\s+/ /g;
+	   $lenght =~s/\((.*?)\)/$1/g;
+
+           chomp($key);
+           chomp($value);
+           chomp($lenght);
+
+           $subCOBData{$cobFile}->{$key}[0] = $value ;
+           $subCOBData{$cobFile}->{$key}[1] = $lenght ;
+       }
+    }
+    close(SUBCOBDATA);
+
+    #print Dumper %subCOBData if($debug);
+}
+
+
+sub process(){
+    my $arg ;
+    my $subCob ;
+    my $dest ;
+    my $lineSt = "";
+    my $lineNo = 0 ; 
+    my @tmpArr = () ;
+    my $tmpVat = "";
+    my $callLine = 0 ;
+   
+     #print "input file : $inputfile\n ";
+    open(DATA, '<', $inputfile) or die "Couldn't open $inputfile , $!";
+    while ($line = <DATA>) {
+        $lineNo = $lineNo + 1 ; 
+        next if($line =~ m/^......\*/ || $line =~ m/^\s*$/);
+        #if($line =~ m/CALL\s+\"([A-Z0-9]+)\"\s+USING\s+(.*)/ && $line !~ m/\"DBIO\"/ ){
+        if($line =~ m/CALL\s+[\"\']([A-Z0-9]+)[\"\']\s+USING\s+(.*)/ && $line !~ m/\"DBIO\"/ ){
+            print "Found CALL $1\n" if($debug);
+            $callLine = $lineNo ; 
+            @tmpArr = () ;
+
+            ($subCob, $arg) = ( $line =~ /^......\s+CALL\s+[\"\']([A-Z0-9]+)[\"\']\s+USING\s+([A-Z0-9\-\.]*)\s*/ );
+            $arg =~ s/\.//g;
+            if($subCob =~ m/^UT/){
+                print "Skiping for $subCob\n" if($debug);
+                next ;
+            }
+            $tmpVat = $tmpVat . "	$subCob" ;
+
+            if($arg eq ""){
+                $lineNo = $lineNo + 1 ; 
+                $nextline = <DATA> ;
+                if($nextline =~ m/^......\s*([a-zA-Z0-9\-]+)\s*.*/ ){
+                    $tmpVat = $tmpVat . "|$1" ;
+                    push(@tmpArr,$1) if($1);
+                }
+            } 
+            else{
+                $tmpVat = $tmpVat . "|$arg" if($arg);
+                push(@tmpArr,$arg) if($arg);
+            }
+
+            $nextline = <DATA> ;
+            $lineNo = $lineNo + 1 ; 
+            while(1){
+               chomp($nextline);
+               if($nextline =~ m/^......\*/ || $nextline =~ m/Micro Focus/ || $nextline =~ m/^\s*$/){
+                   $lineNo = $lineNo + 1 ; 
+                   $nextline = <DATA> ;
+                   next ;
+               }
+               ($arg) = ( $nextline =~ /^......\s*([a-zA-Z0-9\-]+)\s*.*/ );
+               if( grep( /$arg/, @cobolKeywords) || $arg =~ m/EXIT/){
+                   last ;
+               }
+               $tmpVat = $tmpVat . "|$arg" if($arg);
+               push(@tmpArr,$arg) if($arg);
+               $lineNo = $lineNo + 1 ; 
+               $nextline = <DATA> ;
+            }
+        }
+        validateParam($subCob, \@tmpArr, $callLine) if(@tmpArr);
+        $subCob = "" ;
+        @tmpArr = () ;
+    } 
+    close(DATA);
+}
+
+
+sub uncompressFile($){
+
+    my $subCOB = $_[0];
+
+    my $mflistFile = "$mflistdir/$subCOB\.Z";
+    my $cpFile = "$tmpUnCompressDir/$subCOB\.Z";
+    my $rs = "ERR";
+    
+    if(!-e $mflistFile){
+        print "$mflistFile not available\n" if($debug);
+        return "ERR";
+    }
+    my $cpst = `cp -f $mflistFile $cpFile`;
+
+    if($? == 0){
+        print "Copy $subCOB\.Z to $tmpUnCompressDir\n" if($debug);
+        my $unComSt = `uncompress $cpFile`;
+        if($? == 0){
+            print "Uncompress done for $cpFile\n" if ($debug);
+            $rs = "OK:$tmpUnCompressDir/$subCOB";
+        }
+        else{
+            print "Uncompress failed for $cpFile \n" if ($debug);
+            $rs = "ERR" ;
+        }
+   
+    }
+    return $rs;
+}
+
+sub initiateHashForSubCOB($$){
+
+    my $subCOBfile = $_[0];
+    my $subCOBName = $_[1];
+    my $ln ;
+    my $param ;
+    my $param_1 ;
+    my $nextln ;
+    my $lastck = 0 ;
+    my @tmpSubCobParam = ();
+
+    generateHash_variablesSUBCOB($subCOBfile);
+ 
+    open(COBFILE, '<', $subCOBfile) or die "Couldn't open $subCOB, $!";
+    while ($ln = <COBFILE>) {
+        $lastck = 0;
+        chomp($ln);
+        #if($ln =~ m/^......\s+PROCEDURE\s+DIVISION\s+USING\s+([a-zA-Z0-9\-\.]+)\s*$/ || $ln =~ m/^......\s+PROCEDURE\s+DIVISION\s+USING([a-zA-Z0-9\-\.]+)\s*$/){
+        if($ln =~ m/^......\s+PROCEDURE\s+DIVISION\s+USING\s+([a-zA-Z0-9\-\.]+)\s*$/ || $ln =~ m/^......\s+PROCEDURE\s+DIVISION\s+USING([a-zA-Z0-9\-\.]+)\s*$/ || $ln =~ m/^......\s+PROCEDURE\s+DIVISION\s+USING\s*$/){
+                print "Found [$ln]\n" if($debug);
+                $lastck = 1;
+                $param = $1 ;
+                $param =~ s/^\s*|\s*$//g;
+ 
+                if($param eq ""){
+                    $nextln = <COBFILE> ;
+                    if($nextln =~ m/^......\s*([a-zA-Z0-9\-\.]+)\s*.*/){
+                        $param = $1 ;
+                        $param =~ s/^\s*|\s*$//g;
+                        $param_1 = $param ;
+                        $param_1 =~ s/\.//g;
+                        push(@tmpSubCobParam, $param_1) if($param);
+                        $subcallHash{$subCOBName} = \@tmpSubCobParam ;
+                    }
+                }
+                else{
+                    $param_1 = $param ;
+                    $param_1 =~ s/\.//g;
+                    push(@tmpSubCobParam, $param_1) if($param);
+                    $subcallHash{$subCOBName} = \@tmpSubCobParam ;
+                }
+
+                $nextln = <COBFILE> ;
+
+                while(1){
+                    chomp($nextln);       
+                    if($nextln =~ m/^......\*/ || $nextln =~ m/Micro Focus|PARA/ || $nextln =~ m/^\s*$/){
+                        $nextln = <COBFILE> ;
+                        next ;
+                    }
+                    last if($nextln =~ /^...... [a-zA-Z0-9\-\.]+/) ;
+                    ($param) = ( $nextln =~ /^......\s*([a-zA-Z0-9\-\.]+)\s*.*/ );
+                    if( grep( /$param/, @cobolKeywords) || $param =~ m/EXIT/ || $param =~ m/\s+SECTION|MAIN-LINE|MAINLINE|BEGIN|MAIN-PROCESS/){
+                        #print "exit LINE : $nextln\n" if($debug);
+                        last ;
+                    }
+                    $param =~ s/^\s*|\s*$//g;
+                    $param_1 = $param ;
+                    $param_1 =~ s/\.//g;
+                    push(@tmpSubCobParam, $param_1) if($param);
+                    $subcallHash{$subCOBName} = \@tmpSubCobParam ;
+                    $nextln = <COBFILE> ;
+                }
+        }
+         
+        if($lastck == 1){
+            $subcallHash{$subCOBName} = \@tmpSubCobParam ;
+            `rm $subCOBfile` if(-f $subCOBfile);
+            last ;
+        }
+    }
+
+    `rm $subCOBfile` if(-f $subCOBfile);
+    close(COBFILE);
+}
+
+sub checkPCOfile($){
+    my $subCOB =  $_[0] ;
+    
+    if(-e "$pcodir/$subCOB\.PCO"){
+        print "$pcodir/$subCOB found $tmpUnCompressDir/$subCOB\.PCO\n" if($debug) ; 
+        my $cpst = `cp -f "$pcodir/$subCOB\.PCO" "$tmpUnCompressDir/$subCOB\.PCO"`;
+   
+        if($? == 0){
+            print "Copy done from $pcodir/$subCOB\.PCO to $tmpUnCompressDir/$subCOB\.PCO\n" if ($debug);
+            return "OK:$tmpUnCompressDir/$subCOB\.PCO";
+        }
+        else{
+            print "Copy failed for $tmpUnCompressDir/$subCOB\.PCO \n" if ($debug);
+            return "ERR" ;
+        } 
+        
+    }
+    return "ERR" ;
+}
+
+sub validateParam($$$){
+    my $subCOB = $_[0];
+    my @arglist = @{$_[1]};
+    my $lineNo = $_[2];
+
+    if(defined($subcallHash{$subCOB})){
+        print "Already Defined : [$subCOB -> @{$subcallHash{$subCOB}}]\n" if($debug); 
+        my $cmpSt = compareArray(\@arglist,\@{$subcallHash{$subCOB}},$subCOB);
+        print "$lineNo:Compare Status $cmpSt:$subCOB\n\n" if($cmpSt eq "ERR") ;
+    }
+    else {
+        print "Not Already Defined\n" if($debug); 
+        my $unStatus = uncompressFile($subCOB);
+        if($unStatus eq "ERR"){
+            $unStatus = checkPCOfile($subCOB);
+        }
+	my($s, $file) = split(/\:/, $unStatus);
+        if($unStatus =~ m/OK:/){
+            initiateHashForSubCOB($file,$subCOB);
+            if(defined($subcallHash{$subCOB})){
+                my $cmpSt = compareArray(\@arglist,\@{$subcallHash{$subCOB}},$subCOB);
+                print "$lineNo:Compare Status $cmpSt:$subCOB\n\n" if($cmpSt eq "ERR");
+            }
+        }
+    } 
+}
+
+
+sub compareArray($$$){
+
+    my @argList = @{$_[0]};
+    my @hashArrList = @{$_[1]};
+    my $subCOB = $_[2];
+    $subCOB =~ s/\.COB|\.PCO//i;
+    my $status = "OK" ;
+=c
+    #print Dumper \@argList;
+    #print "\n----------------\n";
+    #print Dumper \@hashArrList;
+    #print "\n----------------\n";
+    #print Dumper \%varHash;
+    #print "\n----------------\n";
+    #print Dumper \%subCOBData;
+    #print "\n\n-----------------------\n\n";
+    #print "$subCOB MAIN:@argList SUB:@hashArrList\n" if($debug);
+=cut 
+    my $a1 = @argList ;
+    my $a2 = @hashArrList ;
+
+    #print "Number of Arg	Main:$a1	SUB:$a2\n"  if($debug);
+
+    if($a1 != $a2){
+        print "Parameter count not same\n";
+        $status = "ERR" ;
+    }
+    else {
+        for(my $i = 0 ; $i<$a1 ; $i = $i + 1){
+            if($argList[$i] eq $hashArrList[$i]){
+                #print "ORDER MATCHED $argList[$i]:$varHash{$argList[$i]}{'VAL'} and $hashArrList[$i]:$subCOBData{$subCOB}{$hashArrList[$i]}[0]\n" if($debug); 
+                #print "\n--------\n";
+		$status = "OK" if($status eq "OK");
+            } else{
+                print "ORDER NOT MATCHED $argList[$i]:$varHash{$argList[$i]}{'VAL'} and $hashArrList[$i]:$subCOBData{$subCOB}{$hashArrList[$i]}[0]\n";
+                #print "\n--------\n";
+                $status = "ERR" ;
+            }
+
+            if(!defined($varHash{$argList[$i]}->{'VAL'}) or !defined($subCOBData{$subCOB}{$hashArrList[$i]}[0])){
+                print "DATATYPE NOT DEFINED,VERIFY Manually  $argList[$i]:$varHash{$argList[$i]}{'VAL'} and $hashArrList[$i]:$subCOBData{$subCOB}{$hashArrList[$i]}[0]\n"; 
+                #print "\n--------\n";
+                $status = "ERR" ;
+            }
+            elsif($varHash{$argList[$i]}->{'VAL'} eq $subCOBData{$subCOB}{$hashArrList[$i]}[0]){
+                #print "DATATYPE MATCHED $argList[$i]:$varHash{$argList[$i]}{'VAL'} and $hashArrList[$i]:$subCOBData{$subCOB}{$hashArrList[$i]}[0]\n" if($debug); 
+                #print "\n--------\n";
+
+          
+                $status = "OK" if($status eq "OK");
+            }
+            else{
+                print "DATATYPE NOT MATCHED $argList[$i]:$varHash{$argList[$i]}{'VAL'} and $hashArrList[$i]:$subCOBData{$subCOB}{$hashArrList[$i]}[0]\n";
+                #print "\n--------\n";
+
+                $status = "ERR" ;
+            }
+
+                 if ($varHash{$argList[$i]}->{'LEN'} eq $subCOBData{$subCOB}{$hashArrList[$i]}[1]){
+                          #print "LENGTH MATCHED $argList[$i]:$varHash{$argList[$i]}{'VAL'}($varHash{$argList[$i]}{'LEN'}) and $hashArrList[$i]:$subCOBData{$subCOB}{$hashArrList[$i]}[0]($subCOBData{$subCOB}{$hashArrList[$i]}[1])\n" if($debug);
+                   }
+                else
+                      {
+			$varHash{$argList[$i]}->{'LEN'}=~s/^0+//;
+	       		$subCOBData{$subCOB}{$hashArrList[$i]}[1]=~s/^0+//;
+                         if ("$varHash{$argList[$i]}->{'LEN'}" eq "$subCOBData{$subCOB}{$hashArrList[$i]}[1]")
+                         {
+		       #	print "nothing";
+			}
+			else{
+                        print "LENGTH NOT MATCHED $argList[$i]:$varHash{$argList[$i]}{'VAL'}($varHash{$argList[$i]}{'LEN'}) and $hashArrList[$i]::$subCOBData{$subCOB}{$hashArrList[$i]}[0]($subCOBData{$subCOB}{$hashArrList[$i]}[1])\n";
+                  }
+               
+}
+	
+	#	print "\n---------------END OF VAR -----------------\n\n";
+        }
+    }
+
+    return $status ;
+}
+
+main();
