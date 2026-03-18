@@ -1,0 +1,384 @@
+#!/usr/bin/perl
+#
+# Name :
+#      filehandlechk.pl
+#
+# Purpose:
+#      This program analyses COBOL source code from src folder.
+#      It will identify the count of OPEN READ and CLOSE in COBOL file
+#      and check program id
+#
+# Description:
+#      This program analyses COBOL source code from src folder to find
+#      the count of OPEN the count of READ the count of WRITE and the count of CLOSE
+#      and check program id match with the filename 
+#      in COBOL source code from src folder 
+#      
+#
+# How to run:
+#      See below - value of @MM
+#      filehandlechk.pl -irno <IR number> -if <filename> -d
+#      or
+#      filehandlechk.pl -if BR0501.COB -d 
+#
+
+use Data::Dumper ;
+use Getopt::EvaP ;
+use Env;
+use File::Basename;
+
+my $inputfile ;
+my $outputfile ;
+my $irNumber;
+my %fhName= ();
+my %fhopen= ();
+my $lineNum = 0;
+my $open_count=0;
+my $close_count=0;
+my $read_count=0;
+my $program_id;
+my $pgm_file;
+my $write_flag=0;
+my $write_count=0;
+my $count=0;
+
+@PDT = split /\n/, <<end_of_PDT ;
+PDT
+
+inputfile, if:    string  = \$required
+outputfile, of:   string
+irnumber, irno:   string 
+debug, d:         switch
+
+PDTEND no_file_list
+end_of_PDT
+@MM = split /\n/, <<end_of_MM;
+.inputfile
+          input cobol file
+
+.outputfile
+          output file contain error and ok statments.
+
+.irnumber
+          IR Number for search for specific IR number changes.
+
+.debug
+          debug for print all conditions error and ok.
+
+
+end_of_MM
+
+
+sub main(){
+
+    init();
+    if($irNumber eq "ALL"){
+	readFile();
+    }
+    else{
+	irspec();
+    }
+     }
+
+
+sub init(){
+
+    &EvaP( \@PDT, \@MM, \%cmdarg );
+    $inputfile  = $cmdarg{'inputfile'} ;
+    $outputfile  = $cmdarg{'outputfile'} ;
+    $irNumber  = $cmdarg{'irnumber'} || "ALL";
+    $debug  = $cmdarg{'debug'} ;
+
+
+    if(!-e $inputfile || !-r $inputfile){
+        print "$inputfile not exists or readable\n";
+        exit;
+    }
+
+    if($outputfile eq ""){
+        my $inpFileName = basename($inputfile);
+        $outputfile = "/tmp/$LOGNAME/$inpFileName\_out_err";
+    }
+
+    chomp($inputfile) if($inputfile);
+    chomp($outputfile) if($outputfile);
+    chomp($irNumber) if($irNumber);
+
+    print "\nInput File : $inputfile\nOutput File : $outputfile\nIr Number : $irNumber\n";
+    open(OUTPUT, '>', "$outputfile") or die $!;
+}
+sub readFile(){
+ 
+        open(DATA, '<', $inputfile ) or die "Couldn't open $inputfile , $!";
+	analyse();
+	count();
+}
+sub irspec(){
+
+    my $var = "";
+    my $datatype = "";
+    my $lineNo = 0;
+
+
+    my $startPattern = "START\\s+OF\\s+IR\\s+$irNumber|START\\s+OF\\s+CR\\s+$irNumber";
+    my $endPattern = "END\\s+OF\\s+IR\\s+$irNumber|END\\s+OF\\s+CR\\s+$irNumber";
+
+
+    my $cmd = "perl -ne '/$startPattern/i../$endPattern/i and print' $inputfile";
+
+    #my $content = `$cmd`;
+    #print "$content";
+
+	open(DATA, "$cmd |") or die "Couldn't open command , $!";
+	
+	analyse();
+	count();    
+    }
+
+sub check_id(){
+	if($line =~ m/^.*\s+PROGRAM-ID.\s+(.*)/){
+        my $program_id=$1;
+        my $pgm_file=$inputfile;
+	$pgm_file=~s/\..*//;
+		if($program_id==$pgm_file)
+			{
+			print "PROGRAM ID AND FILENAME MATCHED\n";
+			}
+		else{
+			print "PROGRAM ID AND FILENAME MISMATCHED\n";
+			}
+
+                }
+}
+sub analyse(){
+	
+	while(<DATA>) {
+        $line=$_;
+
+        next if ($line =~ /^......\*/ || $line =~ /^\s*$/);
+        if($line =~ /^......\s+FD\s+(.*)/)
+        {
+         $open_filename=$1;
+        $open_filename =~ s/\.\s*$//g;
+        $open_filename=~ s/^\s+|\s+$//g;        #to trim extra spaces in filename
+        $fhopen{$open_filename}=$open_filename;
+
+        $nextLine = <DATA>;                     #to get next line
+        if($nextLine =~ /^......\s+01\s+(.*)/)
+        {
+        $read_filename =$1;
+        $read_filename =~ s/\.\s*$//g;
+        $read_filename =~ s/^\s+|\s+$//g;
+        $read_filename =~ s/\s+.*//g;            #to remove unwanted string from 01 level variable
+        $fhopen{$open_filename}=$read_filename;
+        #print "NextLine: $fhopen{$open_filename}\n";
+        }
+	}
+
+        check_id();
+
+        #$lineNum = $lineNum + 1 ;
+        if($line =~ m/^.*\s+OPEN\s+INPUT\s+(.*)/) {
+            $fileName=$1;
+            $fileName =~ s/\.\s*$//g;
+	    $fileName=~ s/^\s+|\s+$//g;        	
+	    if(!defined $fhName{$fileName}{'STAT'}){
+		$fhName{$fileName}{'STAT'}=1
+		}
+	    else{		
+            $fhName{$fileName}{'STAT'} +=1 ;         			#hash store filename from  COBOL file
+		}
+            $fhName{$fileName}{'READ'} =1 ;
+	    $fhName{$fileName}{'WRITE'} =0;
+            $open_count=$open_count+1;
+	     if(exists($fhopen{$fileName})){				#for filename
+                        $fhName{$fileName}{'open_flag'}='TRUE';		#open flag to set for which write must be found
+                }
+                else{
+                $fhName{$fileName}{'open_flag'}='FALSE';
+                }
+           print OUTPUT  "OPEN INPUT FOUND is for filename: [$fileName]\n" if $debug;
+           #print "OPEN INPUT  IS [$fileName]\n";
+        }
+
+	if($line =~ m/^.*\s+OPEN\s+OUTPUT\s+(.*)/){
+	    $fileName=$1;
+	    $fileName =~ s/\.\s*$//g;
+	    $fileName=~ s/^\s+|\s+$//g;       
+	    if(!defined($fhName{$fileName}{'STAT'})){
+	    	$fhName{$fileName}{'STAT'}=1
+	    }
+	    else{
+	    	$fhName{$fileName}{'STAT'} +=1 ;
+	    }
+	    $fhName{$fileName}{'READ'} =0 ;
+	    if(!defined($fhName{$fileName}{'WRITE'})){
+            	$fhName{$fileName}{'WRITE'}=1
+        	}
+            else{
+            	$fhName{$fileName}{'WRITE'} +=1 ;
+        	}
+	    #$fhName{$fileName}= $fileName;
+	    print OUTPUT "OPEN OUTPUT FOUND for filename [$fileName]\n" if $debug;
+	    $open_count=$open_count+1;
+		if(exists($fhopen{$fileName})){
+			$fhName{$fileName}{'open_flag'}='TRUE';
+		}
+		else{
+		$fhName{$fileName}{'open_flag'}='FALSE';
+			#print "$fhName{$fileName}{'open_flag'}\n";
+		}
+	}
+	
+	if($line =~  m/^.*\s+OPEN\s+I-O\s+(.*)/){
+	    $fileName=$1;
+            $fileName =~ s/\.\s*$//g;
+            $fileName=~ s/^\s+|\s+$//g;        
+	    if(!defined($fhName{$fileName}{'STAT'})){
+		$fhName{$fileName}{'STAT'}=1;
+		}
+	    else{
+            	$fhName{$fileName}{'STAT'} +=1 ;
+		}
+            $fhName{$fileName}{'READ'} =1 ;
+	    if(!defined($fhName{$fileName}{'WRITE'})){
+            	$fhName{$fileName}{'WRITE'}=1
+            }
+            else{
+            	$fhName{$fileName}{'WRITE'} +=1 ;
+        	}
+
+	    #$fhName{$fileName}= $fileName;
+            print OUTPUT "OPEN I-O FOUND for filename [$fileName]\n" if $debug ;
+	    $open_count=$open_count+1;
+	    if(exists($fhopen{$fileName})){
+        		$fhName{$fileName}{'open_flag'}='TRUE';
+        	}
+	    else{
+        		$fhName{$fileName}{'open_flag'}='FALSE';
+        	}
+
+        }
+	
+	if($line =~  m/^.*\s+OPEN\s+EXTEND\s+(.*)/){
+	    $fileName=$1;
+            $fileName =~ s/\.\s*$//g;
+            $fileName=~ s/^\s+|\s+$//g;        #to trim extra spaces in filename
+	    if(!defined($fhName{$fileName}{'STAT'})){
+		$fhName{$fileName}{'STAT'}=1;
+		}
+	    else{
+            	$fhName{$fileName}{'STAT'} +=1 ;
+		}
+	    if(!defined($fhName{$fileName}{'WRITE'})){
+            	$fhName{$fileName}{'WRITE'}=1
+        	}
+            else{
+            	$fhName{$fileName}{'WRITE'} +=1 ;
+            }
+
+            $fhName{$fileName}{'READ'} =0 ;
+	    #$fhName{$fileName}= $fileName;
+            $open_count=$open_count+1;
+	    print OUTPUT "OPEN EXTEND FOUND for filename [$fileName]\n" if $debug;
+	    if(exists($fhopen{$fileName})){
+        		$fhName{$fileName}{'open_flag'}='TRUE';
+            }
+	     else{
+        		$fhName{$fileName}{'open_flag'}='FALSE';
+        	}
+	}
+
+	if($line =~ m/^......\s+WRITE\s+(.*)/){
+	    $write_fileName=$1;
+            $write_fileName =~ s/\.\s*$//g;
+            $write_fileName =~ s/^\s+|\s+$//g;
+	    $write_fileName =~ s/\s+.*//g;
+		$write_count+= 1;									#counter for write statement
+	#print "WRITE: [$write_fileName]\n";
+		for my $file (keys %fhopen){
+		if($write_fileName eq $fhopen{$file})
+		{
+			$fhName{$file}{'WRITE_FLAG'}+=1;								#counter for write for mentioned filename
+			if($fhName{$file}{'WRITE_FLAG'} == $fhName{$file}{'WRITE'}){                   			
+				print OUTPUT "OPEN and WRITE count MATCHED for filename[$file]\n" if $debug;
+			}
+			else{
+				print OUTPUT "*****************COUNT MISMATCHED******************\n";
+				print OUTPUT "OPEN and WRITE count MISMATCHED for filename[$file]\n";
+				print OUTPUT "*******************************************************\n";
+				}
+			
+			if($fhName{$file}{'open_flag'}='TRUE'){
+			print OUTPUT "WRITE FOUND for filename [$write_fileName]\n"if $debug;
+		}
+		else{
+			print OUTPUT "************************* MISMATCH FOUND ****************\n";
+			print OUTPUT "WRITE FOUND but NOT for required filename [$write_fileName]\n";
+			print OUTPUT "********************* END OF MISMATCH*********************************\n";
+		}
+			}
+			}
+	}
+        if($line=~ m/^......\s+READ\s+([A-Z0-9\-]+)\s*(.*)/) {
+            $fileName=$1;
+            $fileName =~ s/\.//g;
+	    #$fileName =~ s/\.\s*$//g;
+            $read_count=$read_count+1;
+            if (($fhName{$fileName}{'STAT'} ==1 || $fhName{$fileName}{'STAT'} ==1)) {
+            if (defined($fhName{$fileName}{'READ'}) && $fhName{$fileName}{'READ'} ==1) {
+		print OUTPUT "READ FOUND IS [$fileName] \n" if $debug;
+		}
+		}
+            else
+            {
+                $fhName{$fileName}{'READ'} =2;
+               chomp ($line);
+               #print OUTPUT  "READ FOUND, OPEN NOT FOUND before READ for filename: [$fileName] \n";
+                }
+
+        }
+        if($line=~ m/^......\s+CLOSE\s+([A-Z0-9\-]+)\s*(.*)/) {
+            $fileName=$1;
+            #$fileName=~s/\.//g;
+            $fileName =~ s/\.\s*$//g;
+		if(!defined($fhName{$fileName}{'CLOSE'})){
+		$fhName{$fileName}{'CLOSE'} =1;				#close flag counter for filename
+		}
+		else{
+		$fhName{$fileName}{'CLOSE'} +=1;
+		}
+            $close_count=$close_count+1;				#close counter
+                if($fhName{$fileName}{'STAT'} == $fhName{$fileName}{'CLOSE'}) {
+                print OUTPUT "CLOSE FOUND for filename [$fileName]\n" if $debug;
+            } else {
+                print OUTPUT "************************* MISMATCH FOUND ****************\n";
+                print OUTPUT "CLOSE FOUND, OPEN NOT FOUND before CLOSE for filename: [$fileName] \n";
+                print OUTPUT "********************* END OF MISMATCH*********************************\n";
+                }
+       }
+       }
+
+#print Dumper %fhName;
+close(DATA);
+
+
+}
+sub count(){
+        
+        print OUTPUT "Count of OPEN for IR $irNumber:$open_count\n";
+        print OUTPUT "Count of READ for IR $irNumber: $read_count\n";
+        print OUTPUT "Count of CLOSE for IR $irNumber: $close_count\n";
+        print OUTPUT "Count of WRITE for IR $irNumber: $write_count\n";
+	if($open_count==$close_count&&$open_count==$read_count){
+        if($close_count==$read_count){
+        print OUTPUT "*****************COUNT********************\n";
+#       print OUTPUT "Number of OPEN READ CLOSE is equal\n";
+        }
+    }
+    else{
+        print OUTPUT "*****************COUNT MISMATCH********************\n";
+        print OUTPUT "OPEN READ CLOSE count mismatch for IR $irNumber\n";
+   }
+}
+main();
